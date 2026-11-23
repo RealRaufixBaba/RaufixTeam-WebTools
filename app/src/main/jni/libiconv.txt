@@ -1,0 +1,3 @@
+libiconv-1.17/
+	The official GNU libiconv 1.17 sources (vendored at build time by tools/ci/vendor-libiconv.sh)
+	https://ftp.gnu.org/gnu/libiconv/libiconv-1.17.tar.gz

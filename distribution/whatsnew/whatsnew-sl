@@ -1,0 +1,6 @@
+HTTrack 3.51.0: kopirajte spletišče, ki zahteva račun.
+
+• Novo: pred kopiranjem se prijavite v brskalniku. Kopija uporabi to prijavo in spletišču pošlje identiteto vašega brskalnika
+• Novo: polje za glave Accept, z eno vrstico za vsako vrsto povezave
+• Stran Identiteta brskalnika navaja, katerih dodatnih glav kopija ne pošlje
+• Novejše slike, pisave in videoposnetki (webp, avif, svg, mp4, webm) se zdaj prenesejo tudi z drugega spletišča

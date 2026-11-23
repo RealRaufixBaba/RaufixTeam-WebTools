@@ -1,0 +1,72 @@
+RaufixTeam WebTools
+Copyright (C) 2026 RaufixTeam / RaufixBaba
+
+This project is an independent fork of HTTrack Website Copier for Android
+(https://github.com/xroche/httrack-android, pinned upstream commit
+39f0f2de2fbce28f95b19bfdc8205510e3e07d26).
+
+The combined work is distributed under the terms of the GNU General Public
+License, version 3 or any later version (GPL-3.0-or-later); see LICENSE
+and app/src/main/jni/httrack/COPYING.
+
+========================================================================
+Component & Submodule Copyright and License Notices (Verified From Source)
+========================================================================
+
+1. httrack-android (Java Android UI, Service, MirrorServer, JNI glue)
+   Upstream: https://github.com/xroche/httrack-android
+   Pinned commit: 39f0f2de2fbce28f95b19bfdc8205510e3e07d26
+   Copyright: Copyright (C) Xavier Roche and other contributors
+   License: GNU General Public License v3.0 or later (GPL-3.0-or-later)
+   Evidence: app/src/main/res/raw/legal.txt, app/src/main/jni/htslibjni.c,
+             app/src/main/java/com/httrack/android/HTTrackActivity.java,
+             app/src/main/bundle/license/gpl-3.0-standalone.html
+
+2. httrack (Core C mirroring engine & bundled docs/templates)
+   Submodule path: app/src/main/jni/httrack
+   Upstream: https://github.com/xroche/httrack.git
+   Pinned commit: 7a923f4047df1bec18e2ce1b4403c7038d055021 (3.51.0-112-g7a923f40)
+   Copyright: Copyright (C) 1998-2026 Xavier Roche and other contributors
+   License: GNU General Public License v3.0 or later (GPL-3.0-or-later)
+   Evidence: app/src/main/jni/httrack/COPYING,
+             app/src/main/jni/httrack/license.txt,
+             app/src/main/jni/httrack/debian/copyright
+
+3. coffeecatch (Native JNI signal/crash recovery handler)
+   Submodule path: app/src/main/jni/coffeecatch
+   Upstream: https://github.com/xroche/coffeecatch.git
+   Pinned commit: b14cdb0e76a26f92bf6d097c88e6bc2ea9a747ef
+   Copyright: Copyright (c) 2013, Xavier Roche (http://www.httrack.com/)
+   License: BSD-2-Clause (2-clause BSD license without endorsement clause)
+   Evidence: app/src/main/jni/coffeecatch/LICENSE,
+             app/src/main/jni/coffeecatch/coffeecatch.h
+   Obligations: Retain copyright notice, conditions, and disclaimer in source
+                and binary redistributions/documentation.
+
+4. coucal (Cuckoo hashing-based hashtable with stash area)
+   Nested submodule path: app/src/main/jni/httrack/src/coucal
+   Upstream: https://github.com/xroche/coucal.git
+   Pinned commit: 031eaf18ad0a8e1def4ec8dd2f7e077c5dac03b0
+   Copyright: Copyright (C) 2013-2014 Xavier Roche (https://www.httrack.com/)
+   License: BSD-3-Clause
+   Evidence: app/src/main/jni/httrack/src/coucal/LICENSE,
+             app/src/main/jni/httrack/src/coucal/coucal.h
+   - murmurhash3.h (inside coucal): Public Domain (Austin Appleby)
+
+5. Subcomponents bundled inside app/src/main/jni/httrack
+   - src/minizip/*: Copyright (C) 1998-2010 Gilles Vollant, Even Rouault,
+     Mathias Svensson, Info-ZIP — Zlib License
+   - src/md5.c: Colin Plumb (1993) — Public Domain
+   - src/htspsl_data.c: Public Suffix List contributors — MPL-2.0
+   - html/fonts/* (League Spartan): The League Spartan Project Authors — OFL-1.1
+   - html/server/div/com.httrack.WebHTTrack.metainfo.xml: FSFAP
+
+6. Build-time Native & Java Dependencies (fetched/built outside Git)
+   - GNU libiconv 1.17 (tools/ci/vendor-libiconv.sh; built as shared libiconv.so
+     with -DLIBICONV_PLUG): GNU LGPL-2.1-or-later (see GNU libiconv COPYING.LIB)
+   - OpenSSL 3.5.8 (docker/build-openssl.sh; static libssl.a / libcrypto.a):
+     Apache License 2.0 (OpenSSL 3.x)
+   - NanoHTTPD 2.3.1 (org.nanohttpd:nanohttpd:2.3.1): BSD-3-Clause
+   - AndroidX libraries (core 1.13.1, fragment 1.8.2, documentfile 1.0.1,
+     browser 1.8.0) & Kotlin BOM 1.8.22: Apache License 2.0
+   - app/src/main/jni/Android.mk header: Apache License 2.0 (AOSP)

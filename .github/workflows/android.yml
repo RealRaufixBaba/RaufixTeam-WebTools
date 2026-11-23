@@ -1,0 +1,177 @@
+name: Android
+
+on:
+  push:
+    branches: [main, master, "arena/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: r27d
+  NDK_FULL_VERSION: 27.3.13750724
+  ABIS: armeabi-v7a arm64-v8a x86_64
+
+jobs:
+  native:
+    name: native (ndk-build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Set up NDK ${{ env.NDK_VERSION }}
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+      - name: Cache OpenSSL statics
+        id: ssl-cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/openssl-android
+          key: openssl-${{ hashFiles('docker/build-openssl.sh') }}-ndk-${{ env.NDK_VERSION }}-${{ env.ABIS }}
+      - name: Build OpenSSL (cache miss)
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: OUT=/tmp/openssl-android ABIS="${ABIS}" bash docker/build-openssl.sh
+      - name: Vendor libiconv
+        run: tools/ci/vendor-libiconv.sh
+      - name: Stage OpenSSL statics into prebuild/
+        run: OPENSSL_ANDROID_ROOT=/tmp/openssl-android ABIS="${ABIS}" tools/ci/fetch-openssl-statics.sh
+      - name: ndk-build
+        working-directory: app/src/main
+        run: ${{ steps.ndk.outputs.ndk-path }}/ndk-build APP_ABI="${ABIS}" APP_PLATFORM=android-22 -j"$(nproc)"
+      - run: tools/ci/check-branch-protection-test.sh
+      - run: tools/build_strings-test.sh
+      - run: bash tools/ci/verify-phase01-audit.sh
+      - name: Check arm64 branch protection
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: tools/ci/check-branch-protection.sh app/src/main/libs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-libs
+          path: app/src/main/libs/**/*.so
+          if-no-files-found: warn
+
+  assemble:
+    name: assemble (AGP 8 Universal)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up NDK ${{ env.NDK_VERSION }}
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+      - name: Install Android SDK 36 & link NDK
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          yes | "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" >/dev/null
+          mkdir -p "${SDK_ROOT}/ndk"
+          ln -sfn "${{ steps.ndk.outputs.ndk-path }}" "${SDK_ROOT}/ndk/${NDK_FULL_VERSION}"
+      - name: Cache OpenSSL statics
+        id: ssl-cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/openssl-android
+          key: openssl-${{ hashFiles('docker/build-openssl.sh') }}-ndk-${{ env.NDK_VERSION }}-${{ env.ABIS }}
+      - name: Build OpenSSL (cache miss)
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: OUT=/tmp/openssl-android ABIS="${ABIS}" bash docker/build-openssl.sh
+      - name: Vendor libiconv
+        run: tools/ci/vendor-libiconv.sh
+      - name: Stage OpenSSL statics into prebuild/
+        run: OPENSSL_ANDROID_ROOT=/tmp/openssl-android ABIS="${ABIS}" tools/ci/fetch-openssl-statics.sh
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - name: Gradle assemble + test + lint
+        run: ./gradlew --no-daemon assembleDebug assembleRelease testDebugUnitTest lint
+      - name: Sign installable universal release APK
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          APKSIGNER="${SDK_ROOT}/build-tools/36.0.0/apksigner"
+          ZIPALIGN="${SDK_ROOT}/build-tools/36.0.0/zipalign"
+          UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
+          OUT_DIR="app/build/outputs/apk/release-signed"
+          mkdir -p "$OUT_DIR"
+          keytool -genkeypair -v -keystore /tmp/raufix-release.jks \
+            -storepass rwtbuildpass -keypass rwtbuildpass \
+            -alias rwt -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=RaufixTeam WebTools, OU=OpenSource, O=RaufixTeam, C=TR"
+          "$ZIPALIGN" -f -p 4 "$UNSIGNED" /tmp/aligned-release.apk
+          "$APKSIGNER" sign --ks /tmp/raufix-release.jks \
+            --ks-key-alias rwt --ks-pass pass:rwtbuildpass --key-pass pass:rwtbuildpass \
+            --out "${OUT_DIR}/RaufixTeam-WebTools-v1.0.0-universal.apk" \
+            /tmp/aligned-release.apk
+          "$APKSIGNER" verify "${OUT_DIR}/RaufixTeam-WebTools-v1.0.0-universal.apk"
+      - name: Check 16 KB .so alignment
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          for apk in app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release-signed/*.apk; do
+            tools/ci/check-so-alignment.sh "$apk"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results
+          path: app/build/reports/tests/**
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release-signed/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-*.*
+          if-no-files-found: warn
+
+  play-tools:
+    name: play tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: pip install -r tools/ci/play-requirements.txt
+      - run: python3 tools/ci/play_track_admin_test.py
+      - run: python3 tools/ci/play_reviews_test.py
+      - run: python3 tools/ci/play_vitals_test.py
+      - run: tools/ci/check-so-alignment-test.sh

@@ -1,0 +1,69 @@
+# Reproducible build environment for the modernized HTTrack Android app.
+#
+#   - JDK 17            (required by AGP 8.x)
+#   - Android cmdline-tools + platforms 35+36 + build-tools 35+36 (35 kept over the 35->36 bump)
+#   - NDK r27           (Clang, unified toolchain — replaces the r14/GCC hack)
+#   - OpenSSL 3.x static libs cross-compiled for arm64-v8a/x86_64
+#
+# Build:  docker build -t httrack-android-build docker/
+# Use:    docker run --rm -v "$PWD":/src -w /src httrack-android-build \
+#                 ./gradlew assembleRelease
+#
+# The OpenSSL libs are baked into the image under /opt/openssl-android/<abi>/.
+# Point Android.mk's prebuilt paths at them (or copy into app/src/main/prebuild).
+FROM eclipse-temurin:17-jdk-jammy
+
+ARG ANDROID_CMDLINE_VERSION=11076708
+ARG ANDROID_PLATFORM=android-36
+ARG ANDROID_BUILD_TOOLS=36.0.0
+# Keep 35 alongside 36 so one :latest builds both the current app (compileSdk 35) and the
+# 36 bump; drop these once the app is on 36 and no master build still needs 35.
+ARG ANDROID_PLATFORM_PREV=android-35
+ARG ANDROID_BUILD_TOOLS_PREV=35.0.0
+ARG NDK_VERSION=27.3.13750724
+ARG OPENSSL_VERSION=3.5.8
+ARG OPENSSL_SHA256=a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2
+
+ENV ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_HOME=/opt/android-sdk \
+    DEBIAN_FRONTEND=noninteractive
+
+# NOTE: use wget, not curl, for downloads. On this host's Docker/kernel combo
+# curl's threaded DNS resolver fails ("getaddrinfo() thread failed to start")
+# even under seccomp=unconfined, while wget's synchronous resolver works.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      wget unzip git make perl file ca-certificates build-essential && \
+    rm -rf /var/lib/apt/lists/*
+# build-essential: needed by tools/ci/vendor-libiconv.sh (host ./configure) and
+# by OpenSSL's build. wget (not curl): curl's threaded resolver fails on some
+# Docker/kernel combos ("getaddrinfo() thread failed to start").
+
+# --- Android SDK command-line tools ---
+RUN mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" && cd /tmp && \
+    wget -q "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_VERSION}_latest.zip" && \
+    unzip -q "commandlinetools-linux-${ANDROID_CMDLINE_VERSION}_latest.zip" && \
+    mv cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest" && \
+    rm "commandlinetools-linux-${ANDROID_CMDLINE_VERSION}_latest.zip"
+ENV PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+
+# --- SDK packages + NDK ---
+RUN yes | sdkmanager --licenses >/dev/null && \
+    sdkmanager --install \
+      "platform-tools" \
+      "platforms;${ANDROID_PLATFORM}" \
+      "platforms;${ANDROID_PLATFORM_PREV}" \
+      "build-tools;${ANDROID_BUILD_TOOLS}" \
+      "build-tools;${ANDROID_BUILD_TOOLS_PREV}" \
+      "ndk;${NDK_VERSION}" >/dev/null
+ENV ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+
+# --- OpenSSL 3.x static libs for all ABIs ---
+COPY build-openssl.sh /usr/local/bin/build-openssl.sh
+RUN chmod +x /usr/local/bin/build-openssl.sh && \
+    OPENSSL_VERSION="${OPENSSL_VERSION}" OPENSSL_SHA256="${OPENSSL_SHA256}" \
+    OUT=/opt/openssl-android MIN_API=21 \
+    /usr/local/bin/build-openssl.sh && \
+    rm -rf /tmp/*
+ENV OPENSSL_ANDROID_ROOT=/opt/openssl-android
+
+WORKDIR /src

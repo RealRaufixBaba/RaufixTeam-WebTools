@@ -1,0 +1,1640 @@
+/*
+HTTrack Android JAVA Native Interface Stubs.
+
+HTTrack Website Copier, Offline Browser for Windows and Unix
+Copyright (C) Xavier Roche and other contributors
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 3
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <ctype.h>
+#include <jni.h>
+#include <assert.h>
+#include <pthread.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <android/log.h>
+
+#include "htsglobal.h"
+#include "htsbase.h"
+#include "htsopt.h"
+#include "httrack-library.h"
+#include "htsdefines.h"
+#include "htscore.h"
+#include "htsthread.h"
+
+#define USE_COFFEECATCH
+
+/* Recovering a fault is a siglongjmp, which unwinds nothing: the engine's process-wide mutexes
+ * and the heap stay as the faulting frame left them, so the engine is refused from here on. */
+static volatile int engineFaulted = 0;
+
+/* Default-deny LAN/loopback/private SSRF policy; cloud metadata is always blocked. */
+static volatile int allowLanArchiving = 0;
+
+static int rwt_ends_with_ci(const char *str, const char *suffix) {
+  const size_t slen = strlen(str);
+  const size_t xlen = strlen(suffix);
+  size_t i;
+  if (slen < xlen) {
+    return 0;
+  }
+  for (i = 0; i < xlen; i++) {
+    if (tolower((unsigned char)str[slen - xlen + i]) !=
+        tolower((unsigned char)suffix[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int rwt_is_blocked_ipv4_bytes(const unsigned char b[4], int allow_lan) {
+  const unsigned int o0 = b[0];
+  const unsigned int o1 = b[1];
+  const unsigned int o2 = b[2];
+  const unsigned int o3 = b[3];
+
+  /* Cloud metadata endpoints (AWS/GCP/Azure/ECS/Alibaba) — always blocked. */
+  if ((o0 == 169 && o1 == 254 && o2 == 169 && o3 == 254) ||
+      (o0 == 169 && o1 == 254 && o2 == 170 && o3 == 2) ||
+      (o0 == 100 && o1 == 100 && o2 == 100 && o3 == 200)) {
+    return 1;
+  }
+  /* Unspecified (0.0.0.0/8) and multicast/reserved (224.0.0.0/4+) — always blocked. */
+  if (o0 == 0 || o0 >= 224) {
+    return 1;
+  }
+  if (!allow_lan) {
+    if (o0 == 127 || o0 == 10 ||
+        (o0 == 172 && o1 >= 16 && o1 <= 31) ||
+        (o0 == 192 && o1 == 168) ||
+        (o0 == 169 && o1 == 254) ||
+        (o0 == 100 && o1 >= 64 && o1 <= 127)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int rwt_is_blocked_ipv6_bytes(const unsigned char b[16], int allow_lan) {
+  int i;
+  int all_zero = 1;
+  int mapped_v4 = 1;
+
+  for (i = 0; i < 10; i++) {
+    if (b[i] != 0) {
+      mapped_v4 = 0;
+      break;
+    }
+  }
+  if (mapped_v4 && b[10] == 0xff && b[11] == 0xff) {
+    return rwt_is_blocked_ipv4_bytes(&b[12], allow_lan);
+  }
+
+  /* AWS IPv6 IMDS fd00:ec2::254 — always blocked. */
+  if (b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2 &&
+      b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+      b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0 &&
+      b[12] == 0 && b[13] == 0 && b[14] == 0x02 && b[15] == 0x54) {
+    return 1;
+  }
+
+  /* Unspecified :: */
+  for (i = 0; i < 16; i++) {
+    if (b[i] != 0) {
+      all_zero = 0;
+      break;
+    }
+  }
+  if (all_zero) {
+    return 1;
+  }
+  /* Multicast ff00::/8 */
+  if (b[0] == 0xff) {
+    return 1;
+  }
+  if (!allow_lan) {
+    /* ::1 loopback */
+    int loopback = 1;
+    for (i = 0; i < 15; i++) {
+      if (b[i] != 0) {
+        loopback = 0;
+        break;
+      }
+    }
+    if (loopback && b[15] == 1) {
+      return 1;
+    }
+    /* ULA fc00::/7 */
+    if ((b[0] & 0xfe) == 0xfc) {
+      return 1;
+    }
+    /* Link-local fe80::/10 or site-local fec0::/10 */
+    if (b[0] == 0xfe && ((b[1] & 0xc0) == 0x80 || (b[1] & 0xc0) == 0xc0)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void rwt_extract_clean_host(const char *adr, char *out, size_t out_sz) {
+  const char *start = adr;
+  size_t len = 0;
+  if (adr == NULL || out_sz == 0) {
+    if (out_sz > 0) {
+      out[0] = '\0';
+    }
+    return;
+  }
+  if (strncmp(start, "http://", 7) == 0) {
+    start += 7;
+  } else if (strncmp(start, "https://", 8) == 0) {
+    start += 8;
+  } else if (strncmp(start, "ftp://", 6) == 0) {
+    start += 6;
+  }
+  if (start[0] == '[') {
+    const char *close = strchr(start + 1, ']');
+    if (close != NULL) {
+      start += 1;
+      len = (size_t)(close - start);
+    }
+  } else {
+    const char *colon = strchr(start, ':');
+    const char *slash = strchr(start, '/');
+    const char *end = start + strlen(start);
+    if (colon != NULL && colon < end) {
+      end = colon;
+    }
+    if (slash != NULL && slash < end) {
+      end = slash;
+    }
+    len = (size_t)(end - start);
+  }
+  if (len >= out_sz) {
+    len = out_sz - 1;
+  }
+  memcpy(out, start, len);
+  out[len] = '\0';
+  while (len > 0 && out[len - 1] == '.') {
+    out[--len] = '\0';
+  }
+}
+
+static int rwt_is_host_blocked(const char *adr) {
+  char host[256];
+  int allow_lan;
+  struct in_addr v4;
+  struct in6_addr v6;
+  struct addrinfo hints;
+  struct addrinfo *res = NULL;
+  struct addrinfo *rp;
+
+  if (adr == NULL || adr[0] == '\0') {
+    return 0;
+  }
+  if (strncasecmp(adr, "file://", 7) == 0 ||
+      strncasecmp(adr, "javascript:", 11) == 0 ||
+      strncasecmp(adr, "content://", 10) == 0 ||
+      strncasecmp(adr, "data:", 5) == 0) {
+    return 1;
+  }
+
+  rwt_extract_clean_host(adr, host, sizeof(host));
+  if (host[0] == '\0') {
+    return 0;
+  }
+  /* HTTrack virtual primary pseudo-host. */
+  if (strcasecmp(host, "primary") == 0) {
+    return 0;
+  }
+
+  /* Unconditional cloud metadata names. */
+  if (strcasecmp(host, "metadata.google.internal") == 0 ||
+      strcasecmp(host, "metadata") == 0 ||
+      strcasecmp(host, "instance-data") == 0 ||
+      rwt_ends_with_ci(host, ".metadata.google.internal")) {
+    return 1;
+  }
+
+  allow_lan = __atomic_load_n(&allowLanArchiving, __ATOMIC_ACQUIRE);
+  if (!allow_lan) {
+    if (strcasecmp(host, "localhost") == 0 ||
+        rwt_ends_with_ci(host, ".localhost") ||
+        rwt_ends_with_ci(host, ".local") ||
+        rwt_ends_with_ci(host, ".internal")) {
+      return 1;
+    }
+  }
+
+  if (inet_pton(AF_INET, host, &v4) == 1) {
+    return rwt_is_blocked_ipv4_bytes((const unsigned char *)&v4.s_addr, allow_lan);
+  }
+  if (inet_pton(AF_INET6, host, &v6) == 1) {
+    return rwt_is_blocked_ipv6_bytes(v6.s6_addr, allow_lan);
+  }
+
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(host, NULL, &hints, &res) == 0 && res != NULL) {
+    int blocked = 0;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+      if (rp->ai_family == AF_INET) {
+        const struct sockaddr_in *sa4 = (const struct sockaddr_in *)rp->ai_addr;
+        if (rwt_is_blocked_ipv4_bytes((const unsigned char *)&sa4->sin_addr.s_addr, allow_lan)) {
+          blocked = 1;
+          break;
+        }
+      } else if (rp->ai_family == AF_INET6) {
+        const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *)rp->ai_addr;
+        if (rwt_is_blocked_ipv6_bytes(sa6->sin6_addr.s6_addr, allow_lan)) {
+          blocked = 1;
+          break;
+        }
+      }
+    }
+    freeaddrinfo(res);
+    if (blocked) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int rwt_check_link(t_hts_callbackarg *carg, httrackp *opt,
+                          const char *adr, const char *fil, int status) {
+  if (rwt_is_host_blocked(adr)) {
+    return 1; /* 1 = refuse link in HTTrack check_link convention */
+  }
+  if (CALLBACKARG_PREV_FUN(carg, check_link) != NULL) {
+    return CALLBACKARG_PREV_FUN(carg, check_link)(
+        CALLBACKARG_PREV_CARG(carg), opt, adr, fil, status);
+  }
+  return -1; /* leave engine's own verdict alone */
+}
+
+#ifdef USE_COFFEECATCH
+#include "coffeecatch.h"
+#include "coffeejni.h"
+
+/* COFFEE_TRY_JNI leaves coffeecatch's 30s SIGALRM watchdog armed; we report the
+ * fault as a Java Error rather than dying, so disarm it. Do that after the
+ * throw: allocating the exception is the hang the watchdog guards.
+ * The body is copied from upstream's COFFEE_TRY_JNI: re-copy it if that changes. */
+#define COFFEE_TRY_JNI_RECOVER(ENV, CODE)  \
+  do {                                     \
+    COFFEE_TRY() {                         \
+      CODE;                                \
+    } COFFEE_CATCH() {                     \
+      if (coffeecatch_get_signal() > 0) {  \
+        engineFaulted = 1;                 \
+      }                                    \
+      coffeecatch_throw_exception(ENV);    \
+      coffeecatch_cancel_pending_alarm();  \
+    } COFFEE_END();                        \
+  } while(0)
+#endif
+
+/* What a worker thread recovered from, for the crawl thread to report, because a worker has no
+ * JNIEnv to throw with. Reading the flag before the message is what makes the message safe. */
+static char workerFaultMessage[512];
+static int workerFaulted = 0;
+
+/* The crawl being run, so a faulting worker can end it. Its own lock, because the context one
+ * is destroyed before the opt is freed. */
+static httrackp *runningOpt = NULL;
+static pthread_mutex_t runningOptLock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Did a thread the engine spawned for itself recover from a fault? */
+static int hasWorkerFaulted(void) {
+  return __atomic_load_n(&workerFaulted, __ATOMIC_ACQUIRE) != 0;
+}
+
+/* Disarm the watchdog coffeecatch arms when it catches a fault. Only reportWorkerFault() calls
+ * this, and only once it has done everything that can block, because a handler that blocks is
+ * the wedge the watchdog exists to kill. Nothing bounds what the crawl does afterwards. */
+static void clearWorkerFaultWatchdog(void) {
+#ifdef USE_COFFEECATCH
+  coffeecatch_cancel_pending_alarm();
+#endif
+}
+
+#include "htslibjni.h"
+#include "htslibjni-private.h"
+
+/* fine-grained stats */
+#define GENERATE_FINE_STATS 1
+
+/* redirect stdio on a log file ? */
+#define REDIRECT_STDIO_LOG_FILE
+
+/* root path */
+static char *emergencyLog = NULL;
+static char *rootPath = NULL;
+
+/* log assertion failure. */
+static void log_assert_failure(const char* exp, const char* file, int line) {
+  __android_log_print(ANDROID_LOG_VERBOSE, "httrack", "assertion '%s' failed at %s:%d", exp, file, line);
+  /* Nothing is writable before initRootPath(); logcat above carries it either way. */
+  if (emergencyLog != NULL) {
+    /* Owner-only (0600): a crash log created with fopen's default 0666 is world-writable. */
+    const int fd = open(emergencyLog, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd != -1) {
+      FILE *const dumpFile = fdopen(fd, "wb");
+      if (dumpFile != NULL) {
+        fprintf(dumpFile, "assertion '%s' failed at %s:%d\n", exp, file, line);
+        fclose(dumpFile);
+      } else {
+        close(fd);
+      }
+    }
+  }
+}
+
+/* our own assert version. */
+static void assert_failure(const char* exp, const char* file, int line) {
+  log_assert_failure(exp, file, line);
+#ifdef USE_COFFEECATCH
+  coffeecatch_abort(exp, file, line);
+#else
+  abort();
+#endif
+}
+#undef assert
+#define assert(EXP) (void)( (EXP) || (assert_failure(#EXP, __FILE__, __LINE__), 0) )
+
+/* our own debugging log callabck */
+static void httrackLogCallback(httrackp *opt, int type, 
+                               const char *format, va_list args) {
+  __android_log_vprint(get_android_prio(type), "httrack", format, args);
+}
+
+static void debug(const char *format, ...)
+  __attribute__ ((format (printf, 1, 2)));
+static void debug(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  __android_log_vprint(ANDROID_LOG_DEBUG, "httrack", format, args);
+  va_end(args);
+}
+
+static void error(const char *format, ...)
+  __attribute__ ((format (printf, 1, 2)));
+static void error(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  __android_log_vprint(ANDROID_LOG_ERROR, "httrack", format, args);
+  va_end(args);
+}
+
+#ifdef USE_COFFEECATCH
+/* Names one frame of the faulting worker's stack in the log. */
+static void logWorkerFrame(void *arg, const char *module, uintptr_t addr,
+                           const char *function, uintptr_t offset) {
+  int *const index = (int*) arg;
+
+  error("worker frame #%02d %p %s (%s+0x%x)", (*index)++, (void*) addr,
+        module != NULL ? module : "?", function != NULL ? function : "?",
+        (unsigned) offset);
+}
+
+/* Names the fault in the log, hands its message to the crawl thread, and ends the mirror. */
+static void reportWorkerFault(void) {
+  /* Read before the latch below, because a flag already set means the engine faulted before
+     this worker did, and that opt must not be touched again. A fault landing on the crawl
+     thread while this handler runs is not seen, and costs one stop request on a leaked opt. */
+  const int alreadyFaulted = engineFaulted;
+  const char *const message = coffeecatch_get_message();
+  int index = 0;
+
+  /* Latched first, because the logging below can itself wedge on a lock this thread faulted
+     holding, and every guard on the engine reads this flag. */
+  engineFaulted = 1;
+  snprintf(workerFaultMessage, sizeof(workerFaultMessage),
+           "the engine faulted on a worker thread: %s",
+           message != NULL ? message : "unknown fault");
+  error("%s", workerFaultMessage);
+  /* Only the log gets the frames, because this recovery replaces the tombstone that would
+     have named them. */
+  coffeecatch_get_backtrace_info(logWorkerFrame, &index);
+  __atomic_store_n(&workerFaulted, 1, __ATOMIC_RELEASE);
+  /* Cut the crawl's wait for this worker short, which the DNS resolver answers at once. */
+  MUTEX_LOCK(runningOptLock);
+  if (!alreadyFaulted && runningOpt != NULL) {
+    hts_request_stop(runningOpt, 1 /* keep_resume */);
+  }
+  MUTEX_UNLOCK(runningOptLock);
+  /* Last, because everything above can block on a lock this thread faulted holding, and the
+     watchdog is what ends the process when one does. */
+  clearWorkerFaultWatchdog();
+}
+
+/* Wraps every thread the engine spawns for itself, a DNS resolver per hostname and an FTP
+ * fetch, which no JNI entry point covers, so a fault there took the process down with it. */
+static void workerThreadRunner(void (*fun)(void *arg), void *arg) {
+  volatile int bodyNeverRan = 0;
+
+  COFFEE_TRY() {
+    fun(arg);
+  } COFFEE_CATCH() {
+    if (coffeecatch_get_signal() > 0) {
+      reportWorkerFault();
+    } else {
+      bodyNeverRan = 1;
+    }
+  } COFFEE_END();
+
+  /* No handler could be installed, so run the body as the engine did before this hook rather
+     than hand the caller a worker that did nothing. */
+  if (bodyNeverRan) {
+    fun(arg);
+  }
+}
+#endif
+
+/* Thread variable holding context. */
+static pthread_key_t thread_variables;
+
+/* HTTrackLib global class pointer. */
+static jclass cls_HTTrackLib = NULL;
+static jclass cls_HTTrackCallbacks = NULL;
+static jclass cls_HTTrackStats = NULL;
+static jclass cls_HTTrackStats_Element = NULL;
+
+/* HTTrackStats default constructor. */
+static jmethodID cons_HTTrackStats = NULL;
+static jmethodID cons_HTTrackStats_Element = NULL;
+
+/* HTTrackStats methods */
+static jmethodID meth_HTTrackCallbacks_onRefresh = NULL;
+
+/* The stats field */
+static jfieldID field_callbacks = NULL;
+static jfieldID field_nativeObject = NULL;
+
+/* The elements field */
+static jfieldID field_elements = NULL;
+
+/* List of fields (main stats). */
+#define LIST_OF_FIELDS() \
+DECLARE_FIELD(state); \
+DECLARE_FIELD(completion); \
+DECLARE_FIELD(linksScanned); \
+DECLARE_FIELD(linksTotal); \
+DECLARE_FIELD(linksBackground); \
+DECLARE_FIELD(bytesReceived); \
+DECLARE_FIELD(bytesWritten); \
+DECLARE_FIELD(startTime); \
+DECLARE_FIELD(elapsedTime); \
+DECLARE_FIELD(bytesReceivedCompressed); \
+DECLARE_FIELD(bytesReceivedUncompressed); \
+DECLARE_FIELD(filesReceivedCompressed); \
+DECLARE_FIELD(filesWritten); \
+DECLARE_FIELD(filesUpdated); \
+DECLARE_FIELD(filesWrittenBackground); \
+DECLARE_FIELD(requestsCount); \
+DECLARE_FIELD(socketsAllocated); \
+DECLARE_FIELD(socketsCount); \
+DECLARE_FIELD(errorsCount); \
+DECLARE_FIELD(warningsCount); \
+DECLARE_FIELD(infosCount); \
+DECLARE_FIELD(transportFailures); \
+DECLARE_FIELD(totalTransferRate); \
+DECLARE_FIELD(transferRate)
+
+#define STRING "Ljava/lang/String;"
+
+/* List of fields (Element). **/
+#define LIST_OF_FIELDS_ELT() \
+DECLARE_FIELD(STRING, address); \
+DECLARE_FIELD(STRING, path); \
+DECLARE_FIELD(STRING, filename); \
+DECLARE_FIELD("Z", isUpdate); \
+DECLARE_FIELD("I", state); \
+DECLARE_FIELD("I", code); \
+DECLARE_FIELD(STRING, message); \
+DECLARE_FIELD("Z", isNotModified); \
+DECLARE_FIELD("Z", isCompressed); \
+DECLARE_FIELD("J", size); \
+DECLARE_FIELD("J", totalSize); \
+DECLARE_FIELD(STRING, mime); \
+DECLARE_FIELD(STRING, charset)
+
+/* Declare fields ids. */
+#define DECLARE_FIELD(NAME) static jfieldID field_ ##NAME = NULL
+LIST_OF_FIELDS();
+#undef DECLARE_FIELD
+
+/* Declare fields ids (stats). */
+#define DECLARE_FIELD(TYPE, NAME) static jfieldID field_elt_ ##NAME = NULL
+LIST_OF_FIELDS_ELT();
+#undef DECLARE_FIELD
+
+jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+  union {
+    void *ptr;
+    JNIEnv *env;
+  } u;
+  if ((*vm)->GetEnv(vm, &u.ptr, JNI_VERSION_1_6) != JNI_OK) {
+    return -1;
+  }
+  UNUSED(reserved);
+
+  /**
+   * Note: we're not doing much here, because we do not have any clear
+   * guarantee over what is safe inside the JNI_OnLoad() handler (throwing
+   * exceptions ?). The static initializer will do the real job later.
+   */
+
+  /* Java VM 1.6 */
+  return JNI_VERSION_1_6;
+}
+
+static void httrackAssertFailure(const char* exp, const char* file, int line) {
+  assert_failure(exp, file, line);
+}
+
+/* We are supposed to keep the error message string when throwing an
+ * exception, because Java does not copy it and just keeps the UTF-8 buffer
+ * reference. We do it thread-safely at least, but every new exception is
+ * crushing the buffer. */
+static char *getSafeCopy(const char *message) {
+  const size_t size = strlen(message) + 1;
+  thread_context_t*const context = thread_get_variables(thread_variables);
+
+  if (context->capa < size) {
+    for(context->capa = 16 ; context->capa < size ; context->capa <<= 1) ;
+    context->buffer = realloc(context->buffer, context->capa);
+    assert(context->buffer != NULL);
+  }
+  strcpy(context->buffer, message);
+  return context->buffer;
+}
+
+static void throwException(JNIEnv* env, const char *exception,
+    const char *message) {
+  jclass cls = (*env)->FindClass(env, exception);
+  assert(cls != NULL);
+  (*env)->ThrowNew(env, cls, getSafeCopy(message));
+  (*env)->DeleteLocalRef(env, cls);
+}
+
+static void throwRuntimeException(JNIEnv* env, const char *message) {
+  throwException(env, "java/lang/RuntimeException", message);
+}
+
+static void throwIOException(JNIEnv* env, const char *message) {
+  throwException(env, "java/io/IOException", message);
+}
+
+static void throwNPException(JNIEnv* env, const char *message) {
+  throwException(env, "java/lang/NullPointerException", message);
+}
+
+/* Refuse an engine call made after a recovered fault, and tell Java why.
+ * @return 1 when the caller must return without touching the engine. */
+static int refuseIfFaulted(JNIEnv* env) {
+  if (engineFaulted) {
+    throwException(env, "java/lang/IllegalStateException",
+                   "the native engine faulted; it can not be used again in this process");
+    return 1;
+  }
+  return 0;
+}
+
+/* Static initialization. */
+JNICALL void Java_com_httrack_android_jni_HTTrackLib_initStatic(JNIEnv* env, jclass clazz) {
+#define L_(X) #X
+#define L(X) L_(X)
+#define ASSERT_THROWS(EXP)                                          \
+  do {                                                              \
+    if (!(EXP)) {                                                   \
+      throwRuntimeException(env,                                    \
+          "assertion '" #EXP "' failed at " __FILE__ L(__LINE__));  \
+      return ;                                                      \
+    }                                                               \
+  } while(0)
+
+  debug("calling Java_com_httrack_android_jni_HTTrackLib_initStatic");
+
+  /* UNUSED */
+  (void) clazz;
+
+  /* Initialize thread variables. */
+  if (pthread_key_create(&thread_variables, thread_variables_dtor) != 0) {
+    assert(! "pthread_key_create() failed");
+  }
+
+  /* HTTrackLib class */
+  cls_HTTrackLib = findClass(env, "com/httrack/android/jni/HTTrackLib");
+  ASSERT_THROWS(cls_HTTrackLib != NULL);
+  cls_HTTrackCallbacks = findClass(env, "com/httrack/android/jni/HTTrackCallbacks");
+  ASSERT_THROWS(cls_HTTrackCallbacks != NULL);
+  cls_HTTrackStats = findClass(env, "com/httrack/android/jni/HTTrackStats");
+  ASSERT_THROWS(cls_HTTrackStats != NULL);
+  cls_HTTrackStats_Element = findClass(env, "com/httrack/android/jni/HTTrackStats$Element");
+  ASSERT_THROWS(cls_HTTrackStats_Element != NULL);
+
+  /* "Note that jfieldIDs and jmethodIDs are opaque types, not object
+   * references, and should not be passed to NewGlobalRef" */
+
+  /* Constructors */
+  cons_HTTrackStats = (*env)->GetMethodID(env, cls_HTTrackStats, "<init>", "()V");
+  ASSERT_THROWS(cons_HTTrackStats != NULL);
+  cons_HTTrackStats_Element =
+    (*env)->GetMethodID(env, cls_HTTrackStats_Element, "<init>", "()V");
+  ASSERT_THROWS(cons_HTTrackStats_Element != NULL);
+
+  /* Methods */
+  meth_HTTrackCallbacks_onRefresh =
+    (*env)->GetMethodID(env, cls_HTTrackCallbacks, "onRefresh",
+                        "(Lcom/httrack/android/jni/HTTrackStats;)V");
+  ASSERT_THROWS(meth_HTTrackCallbacks_onRefresh != NULL);
+
+  /* The "callbacks" field */
+  field_callbacks = (*env)->GetFieldID(env, cls_HTTrackLib, "callbacks",
+                                       "Lcom/httrack/android/jni/HTTrackCallbacks;");
+  ASSERT_THROWS(field_callbacks != NULL);
+
+  /* The "nativeObject" opaque object. */
+  field_nativeObject = (*env)->GetFieldID(env, cls_HTTrackLib, "nativeObject", "J");
+  ASSERT_THROWS(field_nativeObject != NULL);
+
+  /* Load HTTrackStats fields ids. */
+#define DECLARE_FIELD(NAME) do {                                 \
+  field_ ##NAME = (*env)->GetFieldID(env, cls_HTTrackStats,      \
+                                     #NAME, "J");                \
+  ASSERT_THROWS(field_ ##NAME != NULL);                          \
+} while(0)
+  LIST_OF_FIELDS();
+#undef DECLARE_FIELD
+
+  /* The elements array */
+  field_elements = (*env)->GetFieldID(env, cls_HTTrackStats, "elements",
+                                      "[Lcom/httrack/android/jni/HTTrackStats$Element;");
+  ASSERT_THROWS(field_elements != NULL);
+
+  /* Load HTTrackStats fields (element) ids. */
+#define DECLARE_FIELD(TYPE, NAME) do {                               \
+  field_elt_ ##NAME = (*env)->GetFieldID(env,                        \
+                                         cls_HTTrackStats_Element,   \
+                                         #NAME, TYPE);               \
+  ASSERT_THROWS(field_elt_ ##NAME != NULL);                          \
+} while(0)
+  LIST_OF_FIELDS_ELT();
+#undef DECLARE_FIELD
+
+  /* Initialize engine. */
+  if (hts_init() != 1) {
+    ASSERT_THROWS(! "hts_init() failed");
+  }
+
+  /* Register assert callback */
+  hts_set_error_callback(httrackAssertFailure);
+
+  /* Register log callback */
+  hts_set_log_vprint_callback(httrackLogCallback);
+
+#ifdef USE_COFFEECATCH
+  /* Cover the engine's own threads, which the entry points above do not. */
+  hts_set_thread_runner(workerThreadRunner);
+#endif
+}
+
+static void HTTrackLib_initRootPath(JNIEnv* env, jclass clazz, jstring opath) {
+  if (opath != NULL) {
+    const char* path = (*env)->GetStringUTFChars(env, opath, NULL);
+
+    debug("calling Java_com_httrack_android_jni_HTTrackLib_initRootPath(%s)",
+          path);
+
+    /* Root path. */
+    if (rootPath != NULL) {
+      free(rootPath);
+      rootPath = NULL;
+    }
+    rootPath = strdup(path);
+
+    /* Emergency log. */
+    {
+      const size_t buffer_size = strlen(path) + 256;
+      char *const buffer = malloc(buffer_size);
+      if (buffer != NULL) {
+        snprintf(buffer, buffer_size, "%s/error.txt", path);
+        /* Publish without freeing the old pointer: the crash handler may read it on
+           another thread (use-after-free). One small buffer leaks per rare re-init. */
+        emergencyLog = buffer;
+      }
+    }
+
+    /* Redirect stdio. */
+#ifdef REDIRECT_STDIO_LOG_FILE
+    {
+      const size_t buffer_size = strlen(path) + 256;
+      char *const buffer = malloc(buffer_size);
+      if (buffer != NULL) {
+        snprintf(buffer, buffer_size, "%s/log.txt", path);
+        /* Owner-only (0600) for symmetry with the crash log: no-op on sdcardfs, correct on the internal fallback. */
+        const int fd = open(buffer, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        FILE *const log = fd != -1 ? fdopen(fd, "wb") : NULL;
+        if (log != NULL) {
+          if (dup2(fileno(log), 1) != -1 && dup2(fileno(log), 2) != -1) {
+            fprintf(stderr, "started stdio logging in file\n");
+          } else {
+            error("could not redirect stdout/stderr to log file");
+          }
+          fclose(log); /* fds 1 and 2 keep the redirected file open */
+        } else if (fd != -1) {
+          close(fd);
+        }
+        free(buffer);
+      }
+    }
+#endif
+
+    (*env)->ReleaseStringUTFChars(env, opath, path);
+  }
+#undef ASSERT_THROWS
+#undef L
+#undef L_
+}
+
+JNICALL void
+Java_com_httrack_android_jni_HTTrackLib_initRootPath(JNIEnv* env,
+                                                     jclass clazz,
+                                                     jstring opath) {
+  if (refuseIfFaulted(env)) {
+    return;
+  }
+#ifdef USE_COFFEECATCH
+  COFFEE_TRY_JNI_RECOVER(env, HTTrackLib_initRootPath(env, clazz, opath));
+#else
+  HTTrackLib_initRootPath(env, clazz, opath);
+#endif
+}
+
+/* note: never called on Android */
+void JNI_OnUnload(JavaVM *vm, void *reserved) {
+  union {
+    void *ptr;
+    JNIEnv *env;
+  } u;
+  UNUSED(reserved);
+
+  debug("calling JNI_OnUnload");
+
+  if ((*vm)->GetEnv(vm, &u.ptr, JNI_VERSION_1_6) != JNI_OK) {
+    return ;
+  }
+  releaseClass(u.env, &cls_HTTrackLib);
+  releaseClass(u.env, &cls_HTTrackCallbacks);
+  releaseClass(u.env, &cls_HTTrackStats);
+  releaseClass(u.env, &cls_HTTrackStats_Element);
+
+  pthread_key_delete(thread_variables);
+}
+
+static void setNativeOpt(JNIEnv* env, jobject object, HTTrackLib_context *opt) {
+  (*env)->SetLongField(env, object, field_nativeObject,
+      (jlong) (uintptr_t) (void*) opt);
+}
+
+static HTTrackLib_context* getNativeOpt(JNIEnv* env, jobject object) {
+  return (HTTrackLib_context*) (void*) (uintptr_t)
+      (*env)->GetLongField(env, object, field_nativeObject);
+}
+
+JNICALL jstring Java_com_httrack_android_jni_HTTrackLib_getVersion(JNIEnv* env, jclass clazz) {
+  const char *version = hts_version();
+  assert(version != NULL);
+  UNUSED(clazz);
+  return (*env)->NewStringUTF(env, version);
+}
+
+JNICALL jstring Java_com_httrack_android_jni_HTTrackLib_getFeatures(JNIEnv* env, jclass clazz) {
+  const char *features = hts_is_available();
+  assert(features != NULL);
+  UNUSED(clazz);
+  return (*env)->NewStringUTF(env, features);
+}
+
+JNICALL jstring Java_com_httrack_android_jni_HTTrackLib_getAcceptPreset(JNIEnv* env,
+                                                                        jclass clazz,
+                                                                        jstring obrowser,
+                                                                        jstring okind) {
+  const char *browser, *kind, *accept;
+  jstring result = NULL;
+
+  UNUSED(clazz);
+  /* No caller passes null today, but this is a public native method and
+     GetStringUTFChars(NULL) is undefined. */
+  if (obrowser == NULL || okind == NULL) {
+    throwNPException(env, "null browser or kind");
+    return NULL;
+  }
+  browser = (*env)->GetStringUTFChars(env, obrowser, NULL);
+  if (browser == NULL) {
+    return NULL;
+  }
+  kind = (*env)->GetStringUTFChars(env, okind, NULL);
+  if (kind != NULL) {
+    accept = hts_accept_preset(browser, kind);
+    if (accept != NULL) {
+      result = (*env)->NewStringUTF(env, accept);
+    }
+    (*env)->ReleaseStringUTFChars(env, okind, kind);
+  }
+  (*env)->ReleaseStringUTFChars(env, obrowser, browser);
+  return result;
+}
+
+JNICALL jint Java_com_httrack_android_jni_HTTrackLib_getCustomHeaderVerdict(JNIEnv* env,
+                                                                           jclass clazz,
+                                                                           jstring oheaders,
+                                                                           jstring oline) {
+  const char *headers = NULL;
+  const char *line;
+  jint verdict;
+
+  UNUSED(clazz);
+  /* oheaders is null for the first line; the engine takes NULL for that. */
+  if (oline == NULL) {
+    throwNPException(env, "null header line");
+    return -1;
+  }
+  if (oheaders != NULL) {
+    headers = (*env)->GetStringUTFChars(env, oheaders, NULL);
+    if (headers == NULL) {
+      return -1;
+    }
+  }
+  line = (*env)->GetStringUTFChars(env, oline, NULL);
+  if (line == NULL) {
+    if (headers != NULL) {
+      (*env)->ReleaseStringUTFChars(env, oheaders, headers);
+    }
+    return -1;
+  }
+  verdict = (jint) hts_custom_header_verdict(headers, line);
+  (*env)->ReleaseStringUTFChars(env, oline, line);
+  if (headers != NULL) {
+    (*env)->ReleaseStringUTFChars(env, oheaders, headers);
+  }
+  return verdict;
+}
+
+/* A new HTTrackLib.LoginBundle, or NULL with the exception pending. Looked up
+ * here rather than cached, because one login writes one bundle. */
+static jobject newLoginBundle(JNIEnv* env, jstring url, jint cookies, jint hosts) {
+  jclass cls = (*env)->FindClass(env,
+                                 "com/httrack/android/jni/HTTrackLib$LoginBundle");
+  jmethodID cons = cls != NULL
+    ? (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;II)V")
+    : NULL;
+
+  return cons != NULL
+    ? (*env)->NewObject(env, cls, cons, url, cookies, hosts)
+    : NULL;
+}
+
+/* How many domains the engine listed in result->hosts, which is comma
+ * separated and ends with ",..." when they did not all fit. The marker is not a
+ * domain, so it does not count. */
+static jint countBundleHosts(const char* hosts) {
+  static const char more[] = ",...";
+  const size_t len = strlen(hosts);
+  jint count = len != 0 ? 1 : 0;
+  const char* p;
+
+  for (p = hosts; (p = strchr(p, ',')) != NULL; p++) {
+    count++;
+  }
+  if (len >= sizeof(more) - 1 &&
+      strcmp(hosts + len - (sizeof(more) - 1), more) == 0) {
+    count--;
+  }
+  return count;
+}
+
+JNICALL jobject Java_com_httrack_android_jni_HTTrackLib_writeLoginBundle(JNIEnv* env,
+                                                                        jclass clazz,
+                                                                        jstring opaste,
+                                                                        jstring ofolder,
+                                                                        jstring oagent,
+                                                                        jstring ourl,
+                                                                        jstring ohosts) {
+  const char *paste, *folder, *agent, *url;
+  /* NULL is a value, not a mistake. It asks for the address's own cookies
+     alone. */
+  const char* hosts = NULL;
+  int got_hosts;
+  jobject bundle = NULL;
+
+  UNUSED(clazz);
+  /* No caller passes null today, but this is a public native method and
+     GetStringUTFChars(NULL) is undefined. */
+  if (opaste == NULL || ofolder == NULL || oagent == NULL || ourl == NULL) {
+    throwNPException(env, "null paste, folder, agent or url");
+    return NULL;
+  }
+  /* This one writes a file and runs the engine's own loader over it, unlike the
+     table lookups above, so a faulted engine must not be asked. */
+  if (refuseIfFaulted(env)) {
+    return NULL;
+  }
+  paste = (*env)->GetStringUTFChars(env, opaste, NULL);
+  folder = (*env)->GetStringUTFChars(env, ofolder, NULL);
+  agent = (*env)->GetStringUTFChars(env, oagent, NULL);
+  url = (*env)->GetStringUTFChars(env, ourl, NULL);
+  if (ohosts != NULL) {
+    hosts = (*env)->GetStringUTFChars(env, ohosts, NULL);
+  }
+  got_hosts = ohosts == NULL || hosts != NULL;
+  if (paste != NULL && folder != NULL && agent != NULL && url != NULL && got_hosts) {
+    hts_paste_result result;
+
+    memset(&result, 0, sizeof(result));
+    result.size = sizeof(result);
+    /* 0u: no HTS_PASTE_* flag. */
+    if (hts_bundle_from_paste_hosts(paste, folder, agent, url, hosts, 0u,
+                                    &result)) {
+      jstring written = (*env)->NewStringUTF(env, result.url);
+
+      if (written != NULL) {
+        bundle = newLoginBundle(env, written, (jint) result.cookies,
+                                countBundleHosts(result.hosts));
+      }
+    } else {
+      /* The reason is unlocalized English, so the user gets our own message. */
+      debug("the engine refused the login: %s", result.error);
+    }
+  }
+  if (hosts != NULL) {
+    (*env)->ReleaseStringUTFChars(env, ohosts, hosts);
+  }
+  if (url != NULL) {
+    (*env)->ReleaseStringUTFChars(env, ourl, url);
+  }
+  if (agent != NULL) {
+    (*env)->ReleaseStringUTFChars(env, oagent, agent);
+  }
+  if (folder != NULL) {
+    (*env)->ReleaseStringUTFChars(env, ofolder, folder);
+  }
+  if (paste != NULL) {
+    (*env)->ReleaseStringUTFChars(env, opaste, paste);
+  }
+  return bundle;
+}
+
+JNICALL jboolean Java_com_httrack_android_jni_HTTrackLib_nativeHasFaulted(JNIEnv* env,
+                                                                         jclass clazz) {
+  UNUSED(env);
+  UNUSED(clazz);
+  return engineFaulted ? JNI_TRUE : JNI_FALSE;
+}
+
+JNICALL void Java_com_httrack_android_jni_HTTrackLib_init(JNIEnv* env, jobject object) {
+  HTTrackLib_context *context;
+
+  debug("calling Java_com_httrack_android_jni_HTTrackLib_init");
+
+  /* Silent: a throw from this constructor would kill the activity before it reports the fault. */
+  if (engineFaulted) {
+    error("not creating an engine context: the engine faulted");
+    return;
+  }
+  context = (HTTrackLib_context*) calloc(sizeof(HTTrackLib_context), 1);
+
+  if (context == NULL) {
+    throwRuntimeException(env, "memory exhausted");
+    return;
+  }
+
+  pthread_mutex_init(&context->lock, NULL);
+  context->opt = NULL;
+  context->stop = 0;
+  setNativeOpt(env, object, context);
+}
+
+JNICALL void Java_com_httrack_android_jni_HTTrackLib_free(JNIEnv* env, jobject object) {
+  HTTrackLib_context *const context = getNativeOpt(env, object);
+
+  debug("calling Java_com_httrack_android_jni_HTTrackLib_free");
+
+  /* Leaked on purpose: hts_free_opt() over a faulted opt would fault again, here on the
+     finalizer thread. */
+  if (engineFaulted) {
+    error("not freeing the engine context: it faulted");
+    return;
+  }
+
+  if (context != NULL) {
+    setNativeOpt(env, object, NULL);
+    pthread_mutex_destroy(&context->lock);
+    if (context->opt != NULL) {
+      /* This should never hapend */
+      if (!hts_has_stopped(context->opt)) {
+        const int timeout = 50;  /* Wait at most 5 seconds */
+        int i;
+        error("HTTrack thread is still running but the object is finalized, stopping running thread!");
+        for(i = 0 ; i < timeout && !hts_has_stopped(context->opt) ; i++) {
+          hts_request_stop(context->opt, 1);
+          usleep(/* us ; 1/10s */100000);
+        }
+        assert(hts_has_stopped(context->opt));
+        debug("HTTrack thread has now ended");
+      } else {
+        debug("HTTrack thread has ended");
+      }
+      debug("freeing 'opt' structure");
+      hts_free_opt(context->opt);
+      context->opt = NULL;
+    }
+    free(context);
+  }
+}
+
+static jobject build_stats(jni_context_t *const t, httrackp * opt,
+  lien_back * back, int back_max, int back_index, int lien_n,
+  int lien_tot, int stat_time, hts_stat_struct * stats) {
+#define STATE_MAX 32
+  hts_state_t state[STATE_MAX];
+  size_t index = 0;
+
+  /* create stats object */
+  jobject ostats = (*t->env)->NewObject(t->env, cls_HTTrackStats, cons_HTTrackStats);
+  if (ostats == NULL) {
+    return NULL;
+  }
+
+  assert(stats != NULL);
+
+#define COPY_(VALUE, FIELD) do { \
+  (*t->env)->SetLongField(t->env, ostats, field_ ##FIELD, \
+      (jlong) (VALUE)); \
+} while(0)
+#define COPY(MEMBER, FIELD) COPY_(stats->MEMBER, FIELD)
+
+  /* Copy stats */
+  COPY(HTS_TOTAL_RECV, bytesReceived);
+  COPY(rate, transferRate);
+  COPY(stat_bytes, bytesWritten);
+  COPY(stat_timestart, startTime);
+  COPY(total_packed, bytesReceivedCompressed);
+  COPY(total_unpacked, bytesReceivedUncompressed);
+  COPY(total_packedfiles, filesReceivedCompressed);
+  COPY(stat_files, filesWritten);
+  COPY(stat_updated_files, filesUpdated);
+  COPY(stat_background, filesWrittenBackground);
+  COPY(stat_nrequests, requestsCount);
+  COPY(stat_sockid, socketsAllocated);
+  COPY(stat_nsocket, socketsCount);
+  COPY(stat_errors, errorsCount);
+  COPY(stat_warnings, warningsCount);
+  COPY(stat_infos, infosCount);
+  COPY(stat_transport_failures, transportFailures);
+  if (stat_time > 0 && stats->HTS_TOTAL_RECV > 0) {
+    const jlong rate = (jlong) (stats->HTS_TOTAL_RECV / stat_time);
+    COPY_(rate, totalTransferRate);
+  }
+  COPY(nbk, linksBackground);
+
+  COPY_(hts_is_testing(opt), state);
+  COPY_(hts_is_parsing(opt, -1), completion);
+  COPY_(lien_n, linksScanned);
+  COPY_(lien_tot, linksTotal);
+  COPY_(stat_time, elapsedTime);
+
+  /* Collect individual stats */
+  if (back_index >= 0) {
+    const size_t index_max = STATE_MAX;
+    size_t k;
+    /* current links first */
+    for(k = 0, index = 0 ; k < 2 ; k++) {
+      /* priority (receive first, then requests, then ready slots) */
+      size_t j;
+      for(j = 0; j < 3 && index < index_max ; j++) {
+        size_t _i;
+        /* when k=0, just take first item (possibly being parsed) */
+        for(_i = k; _i < ( k == 0 ? 1 : (size_t) back_max ) && index < index_max; _i++) {        // no lien
+          const size_t i = (back_index + _i) % back_max;
+          /* active link */
+          if (back[i].status >= 0) {
+            /* Cleanup */
+            state[index].state = STATE_NONE;
+            state[index].code = 0;
+            state[index].message = NULL;
+
+            /* Check state */
+            switch (j) {
+            case 0:          // prioritaire
+              if (back[i].status > 0 && back[i].status < 99) {
+                state[index].state = STATE_RECEIVE;
+              }
+              break;
+            case 1:
+              if (back[i].status == STATUS_WAIT_HEADERS) {
+                state[index].state = STATE_RECEIVE;
+              } else if (back[i].status == STATUS_CONNECTING) {
+                state[index].state = STATE_CONNECTING;
+              } else if (back[i].status == STATUS_WAIT_DNS) {
+                state[index].state = STATE_DNS;
+              } else if (back[i].status == STATUS_FTP_TRANSFER) {
+                state[index].state = STATE_FTP;
+              }
+              break;
+            default:
+              if (back[i].status == STATUS_READY) {   // prêt
+                state[index].state = STATE_READY;
+                state[index].code = back[i].r.statuscode;
+                state[index].message = back[i].r.msg;
+              }
+              break;
+            }
+
+            /* Increment */
+            if (state[index].state != STATE_NONE) {
+              /* Take note of the offset */
+              state[index].index = i;
+
+              /* Next one */
+              index++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (GENERATE_FINE_STATS && back_index >= 0) {
+    size_t i;
+
+    /* Elements */
+    jobjectArray elements =
+      (*t->env)->NewObjectArray(t->env, index, cls_HTTrackStats_Element, NULL);
+    if (elements == NULL) {
+      return NULL;
+    }
+
+    /* Put elements in elements field of stats */
+    (*t->env)->SetObjectField(t->env, ostats, field_elements, elements);
+
+    /* Fill */
+    for(i = 0 ; i < index ; i++) {
+      /* Index to back[] */
+      const int index = state[i].index;
+
+      /* Create item */
+      jobject element =
+        (*t->env)->NewObject(t->env, cls_HTTrackStats_Element,
+                             cons_HTTrackStats_Element);
+      if (element == NULL) {
+        return NULL;
+      }
+      (*t->env)->SetObjectArrayElement(t->env, elements, i, element);
+
+      /* Set a string inside "element". */
+#define SET_ELEMENT_STRING(FIELD, STRING) do {                 \
+    jobject str_ = newStringSafe(t->env, STRING);              \
+    if (str_ != NULL) {                                        \
+      (*t->env)->SetObjectField(t->env, element, FIELD, str_); \
+      (*t->env)->DeleteLocalRef(t->env, str_);                 \
+    }                                                          \
+} while(0)
+
+      /* Fill item */
+      SET_ELEMENT_STRING(field_elt_address, back[index].url_adr);
+      SET_ELEMENT_STRING(field_elt_path, back[index].url_fil);
+      SET_ELEMENT_STRING(field_elt_filename, back[index].url_sav);
+      (*t->env)->SetBooleanField(t->env, element, field_elt_isUpdate,
+                                 back[index].is_update != 0);
+      (*t->env)->SetIntField(t->env, element, field_elt_state,
+                             state[i].state);
+      (*t->env)->SetIntField(t->env, element, field_elt_code,
+                             back[index].r.statuscode);
+      SET_ELEMENT_STRING(field_elt_message, back[index].r.msg);
+      (*t->env)->SetBooleanField(t->env, element, field_elt_isNotModified,
+                                 back[index].r.notmodified != 0);
+      (*t->env)->SetBooleanField(t->env, element, field_elt_isCompressed,
+                                 back[index].r.compressed!= 0);
+      (*t->env)->SetLongField(t->env, element, field_elt_size,
+                                 back[index].r.size);
+      (*t->env)->SetLongField(t->env, element, field_elt_totalSize,
+                                 back[index].r.totalsize);
+      SET_ELEMENT_STRING(field_elt_mime, back[index].r.contenttype);
+      SET_ELEMENT_STRING(field_elt_charset, back[index].r.charset);
+
+#undef SET_ELEMENT_STRING
+
+      /* Release local element reference. */
+      (*t->env)->DeleteLocalRef(t->env, element);
+    }
+
+    /* Release local elements reference. */
+    (*t->env)->DeleteLocalRef(t->env, elements);
+  }
+
+  return ostats;
+}
+
+/* Almost every JNI call is illegal while an exception is pending, so clear it
+   here and keep the first one for the caller to rethrow. Returns whether one was
+   seen: keeping it can fail under OOM, and the abort must not hinge on that. */
+static int capturePendingException(jni_context_t *const t) {
+  if ((*t->env)->ExceptionCheck(t->env)) {
+    jthrowable exc = (*t->env)->ExceptionOccurred(t->env);
+    (*t->env)->ExceptionDescribe(t->env);
+    (*t->env)->ExceptionClear(t->env);
+    if (exc != NULL) {
+      if (t->pendingException == NULL) {
+        t->pendingException = (jthrowable) (*t->env)->NewGlobalRef(t->env, exc);
+      }
+      (*t->env)->DeleteLocalRef(t->env, exc);
+    }
+    error("progress callback threw, aborting the mirror");
+    return 1;
+  }
+  return 0;
+}
+
+static int htsshow_loop_internal(jni_context_t *t, httrackp * opt,
+  lien_back * back, int back_max, int back_index, int lien_n,
+  int lien_tot, int stat_time, hts_stat_struct * stats) {
+  int code = 1;
+
+  /* maximum number of objects on local frame */
+  const jint capacity = 128;
+
+  /* object */
+  jobject ostats;
+
+  /* no stats ? (even loop refresh) */
+  if (stats == NULL) {
+    return 1;
+  }
+
+  /* no callbacks */
+  assert(t != NULL);
+  if (t->callbacks == NULL) {
+    return 1;
+  }
+
+  /* a callback already threw: stay out of Java, and keep asking for the abort */
+  if (t->pendingException != NULL) {
+    return 0;
+  }
+
+  /* create a new local frame for local objects (stats, strings ...) */
+  if ((*t->env)->PushLocalFrame(t->env, capacity) == 0) {
+    /* build stats object */
+    if (stats != NULL) {
+      ostats = build_stats(t, opt, back, back_max, back_index, lien_n, lien_tot,
+                           stat_time, stats);
+    } else {
+      ostats = NULL;
+    }
+
+    /* Call refresh method */
+    if (ostats != NULL) {
+      (*t->env)->CallVoidMethod(t->env, t->callbacks,
+                                meth_HTTrackCallbacks_onRefresh, ostats);
+    } else {
+      code = 0;  /* build_stats failed, usually with an exception pending */
+    }
+
+    /* Clear before returning to the engine, which keeps making JNI calls. */
+    if (capturePendingException(t)) {
+      code = 0;
+    }
+
+    /* wipe local frame */
+    (void) (*t->env)->PopLocalFrame(t->env, NULL);
+  } else {
+    capturePendingException(t);  /* PushLocalFrame threw OutOfMemoryError */
+    return 0;  /* error */
+  }
+
+  return code;
+}
+
+static int htsshow_loop(t_hts_callbackarg * carg, httrackp * opt,
+  lien_back * back, int back_max, int back_index, int lien_n,
+  int lien_tot, int stat_time, hts_stat_struct * stats) {
+
+  /* get args context */
+  void *const arg = (void *) CALLBACKARG_USERDEF(carg);
+  jni_context_t *const t = (jni_context_t*) arg;
+
+  /* exit now */
+  if (t->context->stop) {
+    return 0;
+  }
+
+  /* A worker faulted, so end the mirror now rather than let its stop request drain the queue. */
+  if (hasWorkerFaulted()) {
+    return 0;
+  }
+
+  /* pass to internal version */
+  return htsshow_loop_internal(t, opt, back, back_max, back_index,
+      lien_n, lien_tot, stat_time, stats);
+}
+
+JNICALL jboolean
+Java_com_httrack_android_jni_HTTrackLib_stop(JNIEnv* env, jobject object,
+                                             jboolean force) {
+  HTTrackLib_context *const context = getNativeOpt(env, object);
+  jboolean stopped = JNI_FALSE;
+
+  /* The fault may have left this lock held; stop() runs on the UI thread and must not block. */
+  if (engineFaulted) {
+    return JNI_FALSE;
+  }
+
+  if (context == NULL) {
+    throwRuntimeException(env, "null context");
+    return JNI_FALSE;
+  }
+
+  MUTEX_LOCK(context->lock);
+  if (context->opt != NULL) {
+    stopped = JNI_TRUE;
+    if (force) {
+      context->stop = 1;
+    }
+    /* Second argument means keep_resume now, not the force it used to ignore: the hard tap
+       is the one that wants hts-cache/ref kept for a later Continue. */
+    hts_request_stop(context->opt, force);
+  }
+  MUTEX_UNLOCK(context->lock);
+
+  return stopped;
+}
+
+JNICALL jint
+Java_com_httrack_android_jni_HTTrackLib_abortCode(JNIEnv* env, jobject object) {
+  HTTrackLib_context *const context = getNativeOpt(env, object);
+  jint aborted = 0;
+
+  /* Same held-lock hazard as stop(). */
+  if (engineFaulted) {
+    return 0;
+  }
+
+  if (context == NULL) {
+    throwRuntimeException(env, "null context");
+    return 0;
+  }
+
+  MUTEX_LOCK(context->lock);
+  /* exit_xh's own value, not a flag: the three causes want three messages. */
+  if (context->opt != NULL) {
+    aborted = hts_is_exiting(context->opt);
+  }
+  MUTEX_UNLOCK(context->lock);
+
+  return aborted;
+}
+
+JNICALL jboolean
+Java_com_httrack_android_jni_HTTrackLib_wasStopped(JNIEnv* env, jobject object) {
+  HTTrackLib_context *const context = getNativeOpt(env, object);
+  jboolean stopped = JNI_FALSE;
+
+  /* Same held-lock hazard as stop(). */
+  if (engineFaulted) {
+    return JNI_FALSE;
+  }
+
+  if (context == NULL) {
+    throwRuntimeException(env, "null context");
+    return JNI_FALSE;
+  }
+
+  MUTEX_LOCK(context->lock);
+  /* The exit code misses every stop that still returns 0, so ask the engine instead. */
+  if (context->opt != NULL) {
+    stopped = context->opt->state.stop != 0
+        || hts_is_exiting(context->opt) != 0 ? JNI_TRUE : JNI_FALSE;
+  }
+  MUTEX_UNLOCK(context->lock);
+
+  return stopped;
+}
+
+static jint HTTrackLib_buildTopIndex(JNIEnv* env, jclass clazz, jstring opath,
+                                     jstring otemplates) {
+  if (opath != NULL && otemplates != NULL) {
+    const char* path = (*env)->GetStringUTFChars(env, opath, NULL);
+    const char* templates = (*env)->GetStringUTFChars(env, otemplates, NULL);
+    int ret;
+
+    httrackp * const opt = hts_create_opt();
+    opt->log = opt->errlog = NULL;
+    fprintf(stderr, "building top index to %s using templates %s\n", path, templates);
+    ret = hts_buildtopindex(opt, path, templates);
+    hts_free_opt(opt);
+
+    (*env)->ReleaseStringUTFChars(env, opath, path);
+    (*env)->ReleaseStringUTFChars(env, otemplates, templates);
+
+    return ret;
+  } else {
+    throwNPException(env, "null argument(s)");
+    return -1;
+  }
+  UNUSED(clazz);
+}
+
+JNICALL jint
+Java_com_httrack_android_jni_HTTrackLib_buildTopIndex(JNIEnv* env, jclass clazz,
+                                                      jstring opath, jstring otemplates) {
+  /* Refused without a throw: the Java callers dump what they catch, over the fault's own dump. */
+  if (engineFaulted) {
+    error("not building the top index: the engine faulted");
+    return -1;
+  }
+#ifdef USE_COFFEECATCH
+  volatile jint ret = -1;
+  COFFEE_TRY_JNI_RECOVER(env, ret = HTTrackLib_buildTopIndex(env, clazz, opath, otemplates));
+  return ret;
+#else
+  return HTTrackLib_buildTopIndex(env, clazz, opath, otemplates);
+#endif
+}
+
+jint HTTrackLib_main(JNIEnv* env, jobject object, jobjectArray stringArray) {
+  HTTrackLib_context *const context = getNativeOpt(env, object);
+  const int argc =
+      object != NULL ? (*env)->GetArrayLength(env, stringArray) : 0;
+  const size_t argv_size = (argc + 1) * sizeof(char*);
+  char **const argv = (char**) malloc(argv_size);
+
+  debug("calling HTTrackLib_main");
+
+  if (argv != NULL) {
+    int i;
+    int code = -1;
+    int already_running = 0;
+    struct jni_context_t t;
+    t.env = env;
+    t.callbacks = (*env)->GetObjectField(env, object, field_callbacks);
+    t.context = context;
+    t.pendingException = NULL;
+
+    /* Create options and reference it */
+    MUTEX_LOCK(context->lock);
+    if (context->opt == NULL) {
+      /* Create array */
+      for (i = 0; i < argc; i++) {
+        /* Note: a local reference is created here */
+        jstring str = (jstring)(*env)->GetObjectArrayElement(env, stringArray,
+            i);
+        const char * const utf_string = (*env)->GetStringUTFChars(env, str, 0);
+        argv[i] = strdup(utf_string != NULL ? utf_string : "");
+        (*env)->ReleaseStringUTFChars(env, str, utf_string);
+        (*env)->DeleteLocalRef(env, str);
+      }
+      argv[i] = NULL;
+
+      /* Create opt tab */
+      context->opt = hts_create_opt();
+      context->stop = 0;
+      MUTEX_LOCK(runningOptLock);
+      runningOpt = context->opt;
+      MUTEX_UNLOCK(runningOptLock);
+      CHAIN_FUNCTION(context->opt, loop, htsshow_loop, &t);
+      CHAIN_FUNCTION(context->opt, check_link, rwt_check_link, NULL);
+    } else {
+      already_running = 1;
+    }
+    MUTEX_UNLOCK(context->lock);
+
+    if (context->opt != NULL && !already_running) {
+      const hts_stat_struct* stats;
+
+      /* Rock'in! */
+      code = hts_main2(argc, argv, context->opt);
+
+      /* The destructor frees this opt, so no worker may reach it from here on. */
+      MUTEX_LOCK(runningOptLock);
+      runningOpt = NULL;
+      MUTEX_UNLOCK(runningOptLock);
+
+      /* Fetch last stats before cleaning up */
+      stats = hts_get_stats(context->opt);
+      assert(stats != NULL);
+      fprintf(stderr, "status code %d, %d errors, %d warnings\n",
+          code, stats->stat_errors, stats->stat_warnings);
+      (void) htsshow_loop_internal(&t, context->opt, NULL, 0, -1, 0, 0, 0,
+          (hts_stat_struct*) stats);
+
+      /* Raise error if suitable */
+      if (code == -1 && t.pendingException == NULL) {
+        const char *message = hts_errmsg(context->opt);
+        if (message != NULL && *message != '\0') {
+          throwIOException(env, message);
+        }
+      }
+
+      /* Unreference global option tab */
+      /* Freed at destructor time, not here: wasStopped() reads opt after main returns. */
+      /*MUTEX_LOCK(context->lock);
+      hts_free_opt(context->opt);
+      context->opt = NULL;
+      context->stop = 0;
+      MUTEX_UNLOCK(context->lock);*/
+
+      /* Cleanup */
+      for (i = 0; i < argc; i++) {
+        free(argv[i]);
+      }
+      free(argv);
+    } else {
+      if (already_running) {
+        throwRuntimeException(env, "an instance of httrack is already running");
+      } else {
+        throwRuntimeException(env, "not enough native memory to create an httrack context");
+      }
+    }
+
+    /* A callback threw: the engine aborted, and hts_main2 returns the same 0 as
+       a completed mirror, so the exception is the only honest outcome. */
+    if (t.pendingException != NULL) {
+      (*env)->Throw(env, t.pendingException);
+      (*env)->DeleteGlobalRef(env, t.pendingException);
+      code = -1;
+    }
+
+    /* Reported here because the worker had no JNIEnv, and as the java.lang.Error coffeecatch
+       throws for a fault on this thread. */
+    if (hasWorkerFaulted()) {
+      if (!(*env)->ExceptionCheck(env)) {
+        char reported[sizeof(workerFaultMessage)];
+
+        /* Copied first, because a second worker can rewrite the buffer while it is read. */
+        snprintf(reported, sizeof(reported), "%s", workerFaultMessage);
+        throwException(env, "java/lang/Error", reported);
+      }
+      code = -1;
+    }
+
+    /* Return exit code. */
+    return code;
+  } else {
+    char format[256];
+    snprintf(format, sizeof(format), "not enough native memory (%d bytes)",
+             (int) argv_size);
+    throwRuntimeException(env, format);
+    return -1;
+  }
+}
+
+JNICALL void
+Java_com_httrack_android_jni_HTTrackLib_setAllowLanArchiving(JNIEnv* env, jclass clazz,
+                                                             jboolean allow) {
+  (void) env;
+  (void) clazz;
+  __atomic_store_n(&allowLanArchiving, allow == JNI_TRUE ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+JNICALL jint
+Java_com_httrack_android_jni_HTTrackLib_main(JNIEnv* env, jobject object,
+                                             jobjectArray stringArray) {
+  if (refuseIfFaulted(env)) {
+    return -1;
+  }
+#ifdef USE_COFFEECATCH
+  volatile jint code = -1;
+  COFFEE_TRY_JNI_RECOVER(env, code = HTTrackLib_main(env, object, stringArray));
+  return code;
+#else
+  return HTTrackLib_main(env, object, stringArray);
+#endif
+}

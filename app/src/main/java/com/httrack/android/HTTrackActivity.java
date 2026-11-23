@@ -1,0 +1,3817 @@
+/*
+HTTrack Android Java Interface.
+
+HTTrack Website Copier, Offline Browser for Windows and Unix
+Copyright (C) Xavier Roche and other contributors
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 3
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ */
+
+package com.httrack.android;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import android.Manifest;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.res.Configuration;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Parcelable;
+import android.provider.DocumentsContract;
+import android.provider.Settings;
+import android.text.Editable;
+import android.text.Html;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ClickableSpan;
+import android.text.style.URLSpan;
+import android.util.Log;
+import android.util.SparseArray;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup.LayoutParams;
+import android.view.WindowManager;
+import android.view.animation.Animation;
+import android.view.animation.AnimationUtils;
+import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.OnBackPressedCallback;
+import androidx.core.app.ActivityCompat;
+import androidx.documentfile.provider.DocumentFile;
+import androidx.core.app.NotificationChannelCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+import androidx.core.content.ContextCompat;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentActivity;
+import androidx.fragment.app.FragmentManager;
+
+import com.httrack.android.jni.HTTrackLib;
+import com.httrack.android.jni.HTTrackStats;
+import com.httrack.android.jni.HTTrackStats.Element;
+
+public class HTTrackActivity extends FragmentActivity {
+  // Page layouts
+  protected static final int layouts[] = { R.layout.activity_startup,
+      R.layout.activity_proj_name, R.layout.activity_proj_setup,
+      R.layout.activity_mirror_progress, R.layout.activity_mirror_finished };
+
+  // Special layout positions
+  protected static final int LAYOUT_START = 0;
+  protected static final int LAYOUT_PROJECT_NAME = 1;
+  protected static final int LAYOUT_PROJECT_SETUP = 2;
+  protected static final int LAYOUT_MIRROR_PROGRESS = 3;
+  protected static final int LAYOUT_FINISHED = 4;
+
+  // The options map: carried on the intent both ways, and saved in either activity's bundle.
+  protected static final String MAP_NAME = "com.httrack.android.map";
+  // Build stamp of a bundle; another build's R.id values key that same map differently.
+  protected static final String VERSION_CODE_NAME = "com.httrack.android.version";
+  protected static final String PANE_NAME = "com.httrack.android.pane_id";
+
+  // Preferences
+  protected static final String PREFS_NAME = "HTTrackPreferences";
+  protected static final String BASE_NAME = "BasePath";
+  // Whether POST_NOTIFICATIONS was answered. Has to outlive the activity: every rotation
+  // restores pane_id and re-enters onEnterNewPane, which would otherwise re-ask.
+  protected static final String NOTIFY_ASKED_NAME = "NotificationPermissionAsked";
+  // Whether the one-time "import your old mirrors" offer has been shown and dismissed for good.
+  protected static final String IMPORT_OFFERED_NAME = "LegacyImportOffered";
+
+  /* Access as of the last resume, so a grant can be told from a plain return to the app. */
+  private boolean hadStorageAccess;
+  // Whether all-files storage access was ever offered; a refusal keeps mirrors in private storage.
+  protected static final String STORAGE_ASKED_NAME = "StorageAccessAsked";
+  // The root we left on the last move: nothing is migrated, so the older projects are still there.
+  protected static final String PREVIOUS_BASE_NAME = "PreviousBasePath";
+  // App-local on purpose: an engine option lands in winprofile.ini, which WinHTTrack reads.
+  protected static final String KEEP_SCREEN_ON_NAME = "KeepScreenOnWhileMirroring";
+  // Explicit opt-in for archiving local/LAN addresses (cloud metadata remains blocked).
+  protected static final String ALLOW_LAN_NAME = "AllowLanArchiving";
+
+  // <br /> Pattern
+  protected static final Pattern brHtmlPattern = Pattern.compile(Pattern
+      .quote("<br />"));
+  
+  // ".nomedia" ; prevents media scanner from reading media files
+  public static final String NOMEDIA_FILE = ".nomedia";
+
+  // Marks the mirror path in the finish message; the panel swaps it for a span, so it never
+  // resolves as a URL.
+  static final String MIRROR_FOLDER_HREF = "httrack:mirror-folder";
+
+  // Channel carrying every notification we post. Never rename: the user's sound/importance
+  // choices are keyed on it, and a new id silently resets them.
+  protected static final String NOTIFICATION_CHANNEL_ID = "mirror";
+
+  // The channel a running mirror's progress goes to. Never rename, and never raise: an app can
+  // only ever lower a channel's importance, and IMPORTANCE_DEFAULT would buzz on every update.
+  protected static final String PROGRESS_CHANNEL_ID = "mirror-progress";
+  // Its own id, because the job-end policy removes exactly this one.
+  protected static final int PROGRESS_NOTIFICATION_ID = 1;
+
+  /*
+   * Build identifiers. See
+   * <http://developer.android.com/reference/android/os/Build
+   * .VERSION_CODES.html>
+   */
+  protected static class VERSION_CODES {
+    public static final int FROYO = 0x00000008;
+    public static final int HONEYCOMB = 0x0000000b;
+    public static final int KITKAT = 0x00000013;
+    public static final int NOUGAT = 24;
+  };
+
+  // Fields to restore/save state (Note: might be read-only fields)
+  protected static final int fields[][] = { {},
+      { R.id.fieldProjectName, R.id.fieldProjectCategory, R.id.fieldBasePath },
+      { R.id.fieldWebsiteURLs, R.id.radioAction }, {}, { R.id.fieldDisplay } };
+
+  // Activity identifier when using startActivityForResult()
+  protected static final int ACTIVITY_OPTIONS = 0;
+  protected static final int ACTIVITY_FILE_CHOOSER = 1;
+  protected static final int ACTIVITY_PROJECT_NAME_CHOOSER = 2;
+  protected static final int ACTIVITY_CLEANUP = 3;
+  protected static final int ACTIVITY_IMPORT_TREE = 4;
+  protected static final int ACTIVITY_BROWSER_LOGIN = 5;
+  protected static final int ACTIVITY_EXPORT_TREE = 6;
+
+  // Constant on purpose: a per-process tag travels through saved state and through notification
+  // extras, so a cold launch would adopt a dead process's tag.
+  protected static final String RUNNER_FRAGMENT_TAG = "runner_task";
+
+  // Project path
+  protected File projectPath;
+  protected File rscPath;
+
+  // Options mapper, containing all options
+  protected final OptionsMapper mapper = new OptionsMapper();
+
+  // Engine
+  protected RunnerFragment runner = null;
+
+  // Current pane id and context
+  protected int pane_id = -1;
+
+  // Is the application "started" ? (ie. visible to user)
+  protected volatile boolean started;
+
+  // "Project name" pane is dirty
+  protected boolean dirtyNamePane;
+
+  // Project whose saved profile is loaded in the map (reload-guard sentinel); null if none.
+  // Distinct from the map name key, which plain Back navigation writes before any load.
+  protected String loadedProjectName;
+
+  // Handler to execute code in UI thread
+  private final Handler handlerUI = new Handler();
+
+  // The engine refreshes faster than the main thread can draw, so only the newest frame is queued
+  private final ProgressCoalescer<String[]> progressLines = new ProgressCoalescer<String[]>();
+
+  private final Runnable progressLinesTask = new Runnable() {
+    @Override
+    public void run() {
+      final String[] lines = progressLines.take();
+      // Defensive: only a disarm after the post could empty the coalescer, and nothing live does.
+      if (lines != null) {
+        setProgressLinesInternal(lines);
+      }
+    }
+  };
+
+  /* The window carries the screen-on flag, so the answer has to be applied on its own thread. */
+  private final Runnable keepScreenOnTask = new Runnable() {
+    @Override
+    public void run() {
+      refreshKeepScreenOn();
+    }
+  };
+
+  /* The crawl's way back to this window, whichever owner drives it. */
+  private final MirrorSession.Listener sessionListener = new MirrorSession.Listener() {
+    @Override
+    public void onCrawlLive() {
+      // The pane was drawn before the job thread reached the session, so it read no live crawl.
+      handlerUI.post(keepScreenOnTask);
+    }
+
+    @Override
+    public void onProgressLines(final String[] lines) {
+      setProgressLines(lines);
+    }
+
+    @Override
+    public void onStats(final HTTrackStats stats) {
+      setProgressLines(formatProgress(stats));
+    }
+
+    @Override
+    public void onFinished(final MirrorSession.Verdict verdict) {
+      displayFinishedPanel(verdict.message, verdict.errorsCount, verdict.mirrorFolder);
+    }
+  };
+
+  // Interrupt was requested
+  protected boolean interruptRequested;
+
+  // Warn spaces in project name
+  protected boolean warnPreHoneycombSpaceIssue;
+  protected boolean switchEmptyProjectName;
+
+  // Widget data exchange helper
+  private final WidgetDataExchange widgetDataExchange = new WidgetDataExchange(
+      this);
+
+  // Progress-pane strings, cached per attach: the engine refreshes faster than getString().
+  private String string_bytes_saved;
+  private String string_links_scanned;
+  private String string_time;
+  private String string_files_written;
+  private String string_transfer_rate;
+  private String string_files_updated;
+  private String string_active_connections;
+  private String string_errors;
+  private String string_connect;
+  private String string_ready;
+
+  // Project settings
+  protected String version;
+  protected String versionFeatures;
+  protected int versionCode;
+  protected String versionName;
+
+  /* The public storage root when it is ours to write, else null: StoragePaths' shared root. */
+  private File sharedStorageRoot() {
+    return hasAllFilesAccess() ? Environment.getExternalStorageDirectory() : null;
+  }
+
+  /* Default mirror root, a POSIX path the engine takes; the policy is StoragePaths.defaultRoot. */
+  private File getDefaultHTTrackPath() {
+    return StoragePaths.defaultRoot(getExternalFilesDir(null), getFilesDir(), sharedStorageRoot());
+  }
+
+  /*
+   * Guards the persisted BasePath, which may name a public directory from an older build:
+   * from API 30 on, mkdirs() there merely fails without saying why. Null means undecided,
+   * never refused; see StoragePaths.isWritable.
+   */
+  private Boolean isWritableProjectPath(final File path) {
+    return StoragePaths.isWritable(path, getExternalFilesDir(null), getFilesDir(),
+        sharedStorageRoot());
+  }
+
+  /*
+   * (Re)Compute (external) storage pathes for downloaded websites.
+   */
+  private void computeStorageTarget() {
+    final SharedPreferences settings = getSharedPreferences(PREFS_NAME, 0);
+    final String base = settings.getString(BASE_NAME, null);
+    final File baseFile = base != null ? new File(base) : null;
+    final Boolean writable = baseFile != null ? isWritableProjectPath(baseFile) : null;
+
+    boolean missingDir = false;
+    if (baseFile != null && !Boolean.TRUE.equals(writable)) {
+      // Keep the setting: a remount or a regrant can restore it.
+      Log.i(getClass().getSimpleName(), "cannot use base path now: " + base);
+    } else if (baseFile != null && !baseFile.exists() && !baseFile.mkdirs()) {
+      missingDir = true;
+    }
+
+    final File previous = projectPath;
+    projectPath = StoragePaths.resolveRoot(baseFile, writable, getDefaultHTTrackPath());
+
+    StoragePaths.applyRootMove(previous, projectPath, missingDir,
+        new StoragePaths.RootMoveActions() {
+          @Override
+          public void warnMissingDirectory() {
+            showNotification(getString(R.string.directory_does_not_exist) + ": " + base);
+          }
+
+          @Override
+          public void initNativeRoot(final File root) {
+            if (!HTTrackLib.loadedSuccessfully()) {
+              return;
+            }
+            try {
+              HTTrackLib.initRootPath(root.getAbsolutePath());
+            } catch (final Throwable t) {
+              // Recovered native fault: losing the crash log is better than losing the app.
+              Log.e(HTTrackActivity.this.getClass().getSimpleName(),
+                  "could not set the log root path", t);
+            }
+          }
+
+          @Override
+          public void refreshProjectSuggestions() {
+            refreshprojectNameSuggests();
+          }
+
+          @Override
+          public void noteMovedFrom(final File previousRoot) {
+            getSharedPreferences(PREFS_NAME, 0).edit()
+                .putString(PREVIOUS_BASE_NAME, previousRoot.getAbsolutePath()).apply();
+            showNotification(getString(previousRootText(previousRoot),
+                previousRoot.getAbsolutePath()), true);
+          }
+        });
+
+    // Always refreshed: the field may have just been inflated.
+    final View view = findViewById(R.id.fieldBasePath);
+    if (view != null) {
+      TextView.class.cast(view).setText(projectPath.getAbsolutePath());
+    }
+  }
+
+  /*
+   * Set the base path.
+   */
+  private void setBasePath(final String path) {
+    // Only a decided yes: an unvettable path must not be persisted.
+    if (!Boolean.TRUE.equals(isWritableProjectPath(new File(path)))) {
+      showNotification(getString(R.string.directory_does_not_exist) + ": " + path);
+      return;
+    }
+    final SharedPreferences settings = getSharedPreferences(PREFS_NAME, 0);
+    final SharedPreferences.Editor editor = settings.edit();
+    editor.putString(BASE_NAME, path);
+    editor.commit();
+    // Load it
+    computeStorageTarget();
+    refreshprojectNameSuggests();
+    refreshStorageAccessHints();
+  }
+
+  /*
+   * Refresh project name suggest.
+   */
+  private void refreshprojectNameSuggests() {
+    final AutoCompleteTextView name = AutoCompleteTextView.class.cast(this
+        .findViewById(R.id.fieldProjectName));
+    if (name != null) {
+      /* Setup name selection adapter. */
+      final String[] names = getProjectNames();
+      if (names != null) {
+        Log.v(getClass().getSimpleName(), "project names: " + printArray(names));
+        name.setAdapter(new ArrayAdapter<String>(this,
+            android.R.layout.simple_dropdown_item_1line, names));
+      }
+    }
+  }
+
+  /**
+   * Return the project category of a given project.
+   * 
+   * @param projectName
+   * @return the project category, or @c null if none (or there is no such
+   *         project)
+   */
+  private String getProjectCategory(final String projectName) {
+    final SparseArray<String> projectMap = new SparseArray<String>();
+    final File target = new File(getProjectRootFile(), projectName);
+    try {
+      OptionsMapper.unserialize(HTTrackActivity.getProfileFile(target),
+          projectMap);
+      final String description = projectMap.get(R.id.fieldProjectCategory);
+      return description;
+    } catch (final IOException e) {
+      return null;
+    }
+  }
+
+  /*
+   * Check if the external storage is available, and if not, display a warning
+   * message.
+   */
+  private void warnIfExternalStorageUnsuitable() {
+    String message;
+    final String state = Environment.getExternalStorageState();
+    if (Environment.MEDIA_MOUNTED.equals(state)) {
+      final File root = getProjectRootFile();
+      if (root == null) {
+        message = getString(R.string.could_not_get_external_directory);
+      } else if (!root.exists()) {
+        message = getString(R.string.could_not_write_to) + " "
+            + root.getAbsolutePath();
+      } else {
+        return;
+      }
+    } else {
+      if (Environment.MEDIA_MOUNTED_READ_ONLY.equals(state)) {
+        message = getString(R.string.read_only_storage_media);
+      } else {
+        message = getString(R.string.no_storage_media);
+      }
+    }
+    showNotification(message + "\n"
+        + getString(R.string.may_not_download_until_problem_fixed), true);
+  }
+
+  /*
+   * Create a .nomedia empty file
+   * 
+   * @param directory The target directory
+   */
+  protected static boolean createNoMediaFile(final File directory)
+      throws IOException {
+    final File nomedia = new File(directory, HTTrackActivity.NOMEDIA_FILE);
+    if (!nomedia.exists()) {
+      final FileWriter emptyFile = new FileWriter(nomedia);
+      emptyFile.close();
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  /*
+   * Ensure we can connect to the Internet.
+   */
+  protected void ensureInternetIsAvailable() {
+    final boolean hasPermissionNetwork = (ContextCompat.checkSelfPermission(this,
+            Manifest.permission.INTERNET) == PackageManager.PERMISSION_GRANTED);
+    if (!hasPermissionNetwork) {
+      Log.d("httrack", "Requesting access to Internet");
+      ActivityCompat.requestPermissions(this,
+              new String[]{Manifest.permission.INTERNET},
+              REQUEST_INTERNET);
+    } else {
+      Log.d("httrack", "Access to Internet is allowed");
+    }
+  }
+
+  private static final int REQUEST_INTERNET = 2;
+  private static final int REQUEST_POST_NOTIFICATIONS = 3;
+  private static final int REQUEST_WRITE_STORAGE = 4;
+
+  /*
+   * Legacy shared-storage write permission for API < 30. On Android 11+ (API 30+), the app uses
+   * scoped app-specific storage without MANAGE_EXTERNAL_STORAGE and exports via SAF.
+   */
+  private boolean hasAllFilesAccess() {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+      return false;
+    }
+    return ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED;
+  }
+
+  /*
+   * On API < 30, request legacy WRITE_EXTERNAL_STORAGE if not yet granted. On API 30+, mirrors
+   * live in app-scoped storage and can be exported anytime via SAF without special permissions.
+   */
+  protected void ensureStorageAccess() {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+      return;
+    }
+    if (hasAllFilesAccess()) {
+      return;
+    }
+    if (getSharedPreferences(PREFS_NAME, 0).getBoolean(STORAGE_ASKED_NAME, false)) {
+      return;
+    }
+    getSharedPreferences(PREFS_NAME, 0).edit()
+        .putBoolean(STORAGE_ASKED_NAME, true).apply();
+    requestAllFilesAccess();
+  }
+
+  // Legacy WRITE_EXTERNAL_STORAGE prompt for API < 30; on API 30+, opens SAF export/folder picker.
+  private void requestAllFilesAccess() {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+      showNotification(getString(R.string.storage_scoped_saf_hint));
+    } else {
+      ActivityCompat.requestPermissions(this,
+              new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_WRITE_STORAGE);
+    }
+  }
+
+  /*
+   * Base-path panel button: request legacy storage permission on API < 30.
+   */
+  public void onClickEnableAllFilesAccess(final View view) {
+    requestAllFilesAccess();
+  }
+
+  // Base-path panel button.
+  public void onClickBrowseFolder(final View view) {
+    openFolderOrCopyPath(getProjectRootFile());
+  }
+
+  /* Show dir in a file manager, or copy its path when none can reach it, so the user can paste
+   * it into one. */
+  private void openFolderOrCopyPath(final File dir) {
+    if (openFolderInFilesApp(dir)) {
+      return;
+    }
+    final String path = dir.getAbsolutePath();
+    final ClipboardManager clipboard =
+        ClipboardManager.class.cast(getSystemService(CLIPBOARD_SERVICE));
+    if (clipboard != null) {
+      clipboard.setPrimaryClip(ClipData.newPlainText("path", path));
+    }
+    Toast.makeText(this, getString(R.string.base_path_toast, path), Toast.LENGTH_LONG).show();
+  }
+
+  /* Open dir in a file viewer, else the SAF picker pre-navigated to it. False if neither resolves
+   * (e.g. private storage), so the caller falls back to the path. */
+  private boolean openFolderInFilesApp(final File dir) {
+    final String docId =
+        StoragePaths.externalStorageDocId(dir, Environment.getExternalStorageDirectory());
+    if (docId == null) {
+      return false;
+    }
+    final Uri uri =
+        DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
+    // ACTION_VIEW on a directory is honored only by AOSP DocumentsUI; Samsung My Files has none, so
+    // fall back to the SAF picker, which every device ships and pre-navigates to the folder.
+    return startFolderIntent(new Intent(Intent.ACTION_VIEW)
+        .setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        || startFolderIntent(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+            .putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri));
+  }
+
+  // Launch one folder-opening intent; false when unhandled so the next rung can try. startActivity
+  // beats a resolveActivity() pre-check, which targetSdk 30+ visibility makes null for real handlers.
+  private boolean startFolderIntent(final Intent intent) {
+    try {
+      startActivity(intent);
+      return true;
+    } catch (final Exception e) {
+      Log.d(getClass().getSimpleName(), "folder intent unhandled: " + intent.getAction(), e);
+      return false;
+    }
+  }
+
+  // Base-path panel: warn whenever the mirror folder isn't browsable (private storage), which can
+  // outlast the permission bit when a private base path is persisted; offer the grant when it's off.
+  private void refreshStorageAccessHints() {
+    final boolean browsable = StoragePaths.externalStorageDocId(
+        getProjectRootFile(), Environment.getExternalStorageDirectory()) != null;
+    final View grant = findViewById(R.id.buttonEnableAllFiles);
+    if (grant != null) {
+      final boolean showLegacyGrant =
+          android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R
+          && !hasAllFilesAccess();
+      grant.setVisibility(showLegacyGrant ? View.VISIBLE : View.GONE);
+    }
+    final View warning = findViewById(R.id.textStorageWarning);
+    if (warning != null) {
+      warning.setVisibility(browsable ? View.GONE : View.VISIBLE);
+    }
+    final TextView moved = TextView.class.cast(findViewById(R.id.textPreviousRoot));
+    if (moved != null) {
+      // Offer it only while we could actually take it back, or the tap just toasts a refusal.
+      final File previous = getPreviousRootFile();
+      final boolean offer = previous != null
+          && Boolean.TRUE.equals(isWritableProjectPath(previous));
+      if (offer) {
+        moved.setText(getString(previousRootText(previous), previous.getAbsolutePath())
+            + " " + getString(R.string.storage_previous_root_tap));
+      }
+      moved.setVisibility(offer ? View.VISIBLE : View.GONE);
+    }
+  }
+
+  /* The mirrors left behind in a private root are the ones an uninstall takes. */
+  private int previousRootText(final File previous) {
+    return StoragePaths.externalStorageDocId(previous,
+        Environment.getExternalStorageDirectory()) == null
+            ? R.string.storage_previous_root_private : R.string.storage_previous_root;
+  }
+
+  /*
+   * The root we left on the last move, or null when there was none or we are back on it. Only a
+   * hint: it is offered, never applied behind the user's back, and nothing was ever migrated.
+   */
+  private File getPreviousRootFile() {
+    final String previous = getSharedPreferences(PREFS_NAME, 0)
+        .getString(PREVIOUS_BASE_NAME, null);
+    if (previous == null) {
+      return null;
+    }
+    final File file = new File(previous);
+    return file.equals(getProjectRootFile()) ? null : file;
+  }
+
+  /*
+   * Base-path panel hint: go back to the root the last move left behind, where the older projects
+   * still are. Refused like any other base path when it is no longer ours to write.
+   */
+  public void onClickUsePreviousRoot(final View view) {
+    final File previous = getPreviousRootFile();
+    if (previous != null) {
+      // setBasePath refreshes the panel, hint included.
+      setBasePath(previous.getAbsolutePath());
+    }
+  }
+
+  /*
+   * Only a runtime permission from Android 13 on; below that the manifest entry is enough.
+   * Targeting 33+ also drops the automatic prompt, so without this the app posts nothing.
+   */
+  protected void ensureNotificationsAreAllowed() {
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+      return;
+    }
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            == PackageManager.PERMISSION_GRANTED) {
+      Log.d("httrack", "Posting notifications is allowed");
+      return;
+    }
+    // Ask once: a refusal stands until the user revisits it in the system settings. The latch
+    // is set from the result below, not here, so dismissing the dialog (which Android does not
+    // count as a refusal) leaves it to be offered again rather than silently lost.
+    if (getSharedPreferences(PREFS_NAME, 0).getBoolean(NOTIFY_ASKED_NAME, false)) {
+      Log.d("httrack", "Permission to post notifications was already answered");
+      return;
+    }
+    Log.d("httrack", "Requesting permission to post notifications");
+    ActivityCompat.requestPermissions(this,
+            new String[]{Manifest.permission.POST_NOTIFICATIONS},
+            REQUEST_POST_NOTIFICATIONS);
+  }
+
+  /*
+   * Callback to receive permission feedback.
+   */
+  @Override
+  public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    switch (requestCode) {
+      case REQUEST_INTERNET: {
+        if (grantResults.length == 0 || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+          Toast.makeText(this, "The app was not allowed to access the Internet. Hence, it cannot function properly. Please consider granting it this permission", Toast.LENGTH_LONG).show();
+        } else {
+          Log.d("httrack", "Permission to access Internet is granted");
+        }
+      }
+      break;
+      // No Toast unlike the two above: a refusal costs only the end-of-mirror notice.
+      case REQUEST_POST_NOTIFICATIONS: {
+        // An empty result is a dismissal, not an answer, so leave the latch clear and re-offer.
+        if (grantResults.length != 0) {
+          getSharedPreferences(PREFS_NAME, 0).edit().putBoolean(NOTIFY_ASKED_NAME, true).apply();
+          Log.d("httrack", "Permission to post notifications is "
+                  + (grantResults[0] == PackageManager.PERMISSION_GRANTED ? "granted" : "denied"));
+        }
+      }
+      break;
+      // Legacy write (API <= 29). A refusal keeps mirrors private; on a grant, re-point to public.
+      case REQUEST_WRITE_STORAGE: {
+        if (grantResults.length != 0) {
+          getSharedPreferences(PREFS_NAME, 0).edit().putBoolean(STORAGE_ASKED_NAME, true).apply();
+          if (grantResults[0] == PackageManager.PERMISSION_GRANTED && runner == null) {
+            computeStorageTarget();
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  /*
+   * Ensure the "Websites" directory exists.
+   * 
+   * Note: calls computeStorageTarget().
+   */
+  protected boolean ensureExternalStorage() {
+    Log.d("httrack", "called ensureExternalStorage");
+
+    ensureStorageAccess();
+    computeStorageTarget();
+    ensureInternetIsAvailable();
+
+    final File root = getProjectRootFile();
+    if (root != null && mkdirsRetry(root)) {
+      Log.d(getClass().getSimpleName(), "validated " + root.getAbsolutePath());
+
+      /*
+       * Android: "Include an empty file named .nomedia in your external files
+       * directory (note the dot prefix in the filename). This prevents media
+       * scanner from reading your media files"
+       */
+      try {
+        if (createNoMediaFile(root)) {
+          Log.d(getClass().getSimpleName(), "successfully created "
+              + HTTrackActivity.NOMEDIA_FILE + " file");
+        }
+      } catch (final IOException io) {
+        Log.w(getClass().getSimpleName(), "could not create "
+            + HTTrackActivity.NOMEDIA_FILE + " file", io);
+      }
+
+      return true;
+    } else {
+      Log.w(getClass().getSimpleName(), "could not create "
+          + (root != null ? root.getAbsolutePath() : "<NULL ROOTPATH!>"));
+      return false;
+    }
+  }
+
+  /** This build's own PackageInfo; not finding our own package is unrecoverable. **/
+  protected static PackageInfo packageInfo(final Context context) {
+    try {
+      return context.getPackageManager().getPackageInfo(
+          context.getPackageName(), 0);
+    } catch (final NameNotFoundException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  @Override
+  protected void onCreate(final Bundle savedInstanceState) {
+    Log.d(getClass().getSimpleName(), "onCreate");
+    super.onCreate(savedInstanceState);
+
+    getOnBackPressedDispatcher().addCallback(this, stayAliveWhileMirroring);
+
+    cancelStaleProgressNotification();
+
+    // Attempt to load the native library.
+    // Fetch httrack engine version
+    if (HTTrackLib.loadLibraries()) {
+      version = HTTrackLib.getVersion();
+      versionFeatures = HTTrackLib.getFeatures();
+    } else {
+      new AlertDialog.Builder(this).setTitle("Fatal Error").setMessage(HTTrackLib.loadError().getMessage()).show();
+    }
+
+    // Android package version code
+    final PackageInfo info = packageInfo(this);
+    versionCode = info.versionCode;
+    versionName = info.versionName;
+
+    // Compute target directory on external storage
+    ensureExternalStorage();
+
+    // Check if an external storage is available
+    warnIfExternalStorageUnsuitable();
+
+    // Extract resources if necessary
+    rscPath = buildResourceFile();
+
+    // Ensure users can see us
+    HTTrackActivity.setFileReadWrite(getProjectRootFile());
+
+    // Clear map (useful to get dynamic fields)
+    mapper.setContext(this);
+    mapper.resetMap();
+    loadedProjectName = null;
+
+    // Go to first pane now
+    setPane(0);
+
+    // Load intent ? (example: shutdown phone, and power-it on during setup)
+    final Bundle extras = getIntent().getExtras();
+    if (extras != null) {
+      restoreInstanceState(extras);
+    }
+
+    // First launch only, so a rotation does not bring the offer back; and not stacked on top
+    // of the native-load failure dialog. Silent unless mirrors are already visible; onResume()
+    // asks again once a storage grant makes them so.
+    hadStorageAccess = hasAllFilesAccess();
+    if (savedInstanceState == null && HTTrackLib.loadedSuccessfully()) {
+      offerLegacyMirrorImportOnce();
+    }
+  }
+
+  @Override
+  protected void onNewIntent(final Intent intent) {
+    Log.d(getClass().getSimpleName(), "onNewIntent");
+    super.onNewIntent(intent);
+
+    // A state we refuse must not become the intent restartActivity() would reopen.
+    final Bundle extras = intent.getExtras();
+    if (ResumePolicy.restoresIntentState(extras != null, hasLiveRunner())
+        && restoreInstanceState(extras)) {
+      setIntent(intent);
+    }
+  }
+
+  /* Install/Update time. */
+  private long installOrUpdateTime() {
+    final ApplicationInfo appInfo = getApplicationInfo();
+    final String appFile = appInfo.sourceDir;
+    final long installed = new File(appFile).lastModified();
+    return installed;
+  }
+
+  /**
+   * Get the resource directory. Create it if necessary. Resources are created
+   * in the dedicated cache, so that the files can be uninstalled upon
+   * application removal.
+   **/
+  private File buildResourceFile() {
+    final File cache = android.os.Build.VERSION.SDK_INT >= VERSION_CODES.FROYO ? getExternalCacheDir()
+        : getCacheDir();
+    final File rscPath = new File(cache, "resources");
+    final File stampFile = new File(rscPath, "resources.stamp");
+    final long stamp = installOrUpdateTime();
+
+    // Check timestamp of resources. If the applicate has been updated,
+    // recreated cached resources.
+    if (rscPath.exists()) {
+      long diskStamp = 0;
+      try {
+        if (stampFile.exists()) {
+          final FileReader reader = new FileReader(stampFile);
+          final BufferedReader lreader = new BufferedReader(reader);
+          try {
+            diskStamp = Long.parseLong(lreader.readLine());
+          } catch (final NumberFormatException nfe) {
+            diskStamp = 0;
+          }
+          lreader.close();
+          reader.close();
+        }
+      } catch (final IOException io) {
+        diskStamp = 0;
+      }
+      // Different one: wipe and recreate
+      if (stamp != diskStamp) {
+        Log.i(getClass().getSimpleName(),
+            "deleting old resources " + rscPath.getAbsolutePath()
+                + " (app_stamp=" + stamp + " != disk_stamp=" + diskStamp + ")");
+        CleanupActivity.deleteRecursively(rscPath);
+      } else {
+        Log.i(getClass().getSimpleName(),
+            "keeping resources " + rscPath.getAbsolutePath()
+                + " (app_stamp=disk_stamp=" + stamp + ")");
+      }
+    }
+
+    // Recreate resources ?
+    if (!rscPath.exists()) {
+      Log.i(getClass().getSimpleName(),
+          "creating resources " + rscPath.getAbsolutePath() + " with stamp "
+              + stamp);
+      if (HTTrackActivity.mkdirs(rscPath)) {
+        long totalSize = 0;
+        int totalFiles = 0;
+        try {
+          final InputStream zipStream = getResources().openRawResource(
+              R.raw.resources);
+          final ZipInputStream file = new ZipInputStream(zipStream);
+          ZipEntry entry;
+          while ((entry = file.getNextEntry()) != null) {
+            final File dest = new File(rscPath.getAbsoluteFile(), entry.getName());
+            // An entry name is not a path segment, so a ".." in one would extract outside.
+            if (!StoragePaths.isInsideRoot(dest.getCanonicalPath(),
+                rscPath.getCanonicalPath())) {
+              throw new IOException("resource entry outside the cache: " + entry.getName());
+            }
+            if (entry.getName().endsWith("/")) {
+              dest.mkdirs();
+            } else {
+              // Don't rely on the archive ordering dir entries before their files.
+              mkdirs(dest.getParentFile());
+              final FileOutputStream writer = new FileOutputStream(dest);
+              final byte[] bytes = new byte[1024];
+              int length;
+              while ((length = file.read(bytes)) >= 0) {
+                writer.write(bytes, 0, length);
+                totalSize += length;
+              }
+              writer.close();
+              totalFiles++;
+              dest.setLastModified(entry.getTime());
+            }
+          }
+          file.close();
+          zipStream.close();
+          Log.i(getClass().getSimpleName(),
+              "created resources " + rscPath.getAbsolutePath() + " ("
+                  + totalFiles + " files, " + totalSize + " bytes)");
+
+          // Write stamp
+          final FileWriter writer = new FileWriter(stampFile);
+          final BufferedWriter lwriter = new BufferedWriter(writer);
+          lwriter.write(Long.toString(stamp));
+          lwriter.close();
+          writer.close();
+
+          // Little info
+          showNotification(getString(R.string.info_recreated_resources));
+        } catch (final IOException io) {
+          Log.w(getClass().getSimpleName(), "could not create resources", io);
+          CleanupActivity.deleteRecursively(rscPath);
+          showNotification(getString(R.string.info_could_not_create_resources),
+              true);
+        }
+      }
+    }
+
+    // Return resources path
+    return rscPath;
+  }
+
+  /** Return a text resource as a string. **/
+  private String getTextResource(final int id) {
+    try {
+      final InputStream is = getResources().openRawResource(id);
+      final byte[] b = new byte[is.available()];
+      is.read(b);
+      return new String(b, "UTF-8");
+    } catch (final IOException io) {
+      return "resource not found";
+    }
+  }
+
+  /**
+   * Get the resource directory.
+   * 
+   * @return the resource directory
+   */
+  private File getResourceFile() {
+    return rscPath;
+  }
+
+  /**
+   * Get a map value.
+   * 
+   * @param key
+   *          The key
+   * @return The value
+   */
+  public String getMap(final int key) {
+    return mapper.getMap(key);
+  }
+
+  /**
+   * Set a map value.
+   * 
+   * @param key
+   *          The key
+   * @param value
+   *          The value
+   */
+  public void setMap(final int key, final String value) {
+    mapper.setMap(key, value);
+  }
+
+  /**
+   * Trunk to mapper's buildCommandline(), plus what a saved login needs. See
+   * {@link BrowserLoginPolicy#withLogin}, which owns that decision.
+   *
+   * @return the engine options, the bundle folder last
+   */
+  public synchronized List<String> buildCommandline() {
+    return BrowserLoginPolicy.withLogin(mapper.buildCommandline(),
+        StoragePaths.loginBundleDir(getFilesDir(), mapper.getProjectName()));
+  }
+
+  /**
+   * Are there any projects yet ?
+   * 
+   * @return true if projects have been detected
+   */
+  protected boolean hasProjectNames() {
+    final String[] names = getProjectNames();
+    return names != null && names.length != 0;
+  }
+
+  /**
+   * Get the root directory.
+   * 
+   * @return The root directory.
+   */
+  protected File getProjectRootFile() {
+    return projectPath;
+  }
+
+  /**
+   * Get the root index.html file.
+   * 
+   * @return The root index.html file.
+   */
+  protected File getProjectRootIndexFile() {
+    final File target = getProjectRootFile();
+    return new File(target, "index.html");
+  }
+
+  /**
+   * A top index is present.
+   * 
+   * @return true if a top index.html is present
+   */
+  private boolean hasProjectRootIndexFile() {
+    return getProjectRootIndexFile().exists();
+  }
+
+  /**
+   * Return the already downloaded project names.
+   * 
+   * @return The list of project names.
+   */
+  protected String[] getProjectNames() {
+    final File dir = getProjectRootFile();
+    if (dir != null && dir.exists() && dir.isDirectory()) {
+      final List<String> list = new ArrayList<String>();
+      final File[] listFiles = dir.listFiles();
+      if (listFiles != null) {
+        for (final File item : listFiles) {
+          if (item.isDirectory()) {
+            final File profile = new File(new File(item, "hts-cache"),
+                "winprofile.ini");
+            if (profile.exists() && profile.isFile()) {
+              list.add(item.getName());
+            }
+          }
+        }
+      }
+      return list.toArray(new String[] {});
+    }
+    return null;
+  }
+
+  /**
+   * Get the destination directory for the current project.
+   * 
+   * @return The destination directory.
+   */
+  protected File getTargetFile() {
+    final String name = mapper.getProjectName();
+    if (name != null && name.length() != 0) {
+      // Backstop: a name that is not a single in-root segment must never become an output path.
+      if (!StoragePaths.isValidProjectName(name)) {
+        Log.w(getClass().getSimpleName(), "rejecting unsafe project name: " + name);
+        return null;
+      }
+      return new File(getProjectRootFile(), name);
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Get the index.htm for the current project.
+   * 
+   * @return The destination directory.
+   */
+  protected File getTargetIndexFile() {
+    final File target = getTargetFile();
+    if (target != null) {
+      return new File(target, "index.html");
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Check whether an index.html file is present for the current project.
+   * 
+   * @return true if an index.html file is present for the current project.
+   */
+  protected boolean hasTargetIndexFile() {
+    final File index = getTargetIndexFile();
+    return index != null && index.exists();
+  }
+
+  /**
+   * Get the hts-log.txt for the current project.
+   * 
+   * @return The destination directory.
+   */
+  protected File getTargetLogFile() {
+    final File target = getTargetFile();
+    if (target != null && target.exists()) {
+      final File log = new File(target, "hts-log.txt");
+      return log;
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Check whether an hts-log.txt file is present for the current project.
+   * 
+   * @return true if an hts-log.txt file is present for the current project.
+   */
+  protected boolean hasTargetLogFile() {
+    final File index = getTargetLogFile();
+    return index != null && index.exists();
+  }
+
+  /**
+   * Pretty-print a string array.
+   * 
+   * @param array
+   *          The string array
+   * @return The pretty-printed value
+   */
+  static String printArray(final String[] array) {
+    final StringBuilder builder = new StringBuilder();
+    for (final String s : array) {
+      if (builder.length() != 0) {
+        builder.append(' ');
+      }
+      builder.append(s);
+    }
+    return builder.toString();
+  }
+
+  /**
+   * Return the IPv6 address.
+   * 
+   * @return The ipv6 address, or @c null if no IPv6 connectivity is available.
+   */
+  protected static InetAddress getIPv6Address() {
+    try {
+      for (final Enumeration<NetworkInterface> interfaces = NetworkInterface
+          .getNetworkInterfaces(); interfaces.hasMoreElements();) {
+        final NetworkInterface iface = interfaces.nextElement();
+        for (final Enumeration<InetAddress> addresses = iface
+            .getInetAddresses(); addresses.hasMoreElements();) {
+          final InetAddress address = addresses.nextElement();
+          Log.d(HTTrackActivity.class.getSimpleName(), "seen interface: "
+              + address.toString());
+          if (address instanceof Inet6Address) {
+            if (!address.isLoopbackAddress() && !address.isLinkLocalAddress()
+                && !address.isSiteLocalAddress()
+                && !address.isMulticastAddress()) {
+              return address;
+            }
+          }
+        }
+      }
+    } catch (final SocketException se) {
+      Log.w(HTTrackActivity.class.getSimpleName(),
+          "could not enumerate interfaces", se);
+    }
+    return null;
+  }
+
+  /**
+   * is IPv6 available on this phone ?
+   * 
+   * @return true if IPv6 is available on this phone
+   */
+  protected static boolean isIPv6Enabled() {
+    return getIPv6Address() != null;
+  }
+
+  /**
+   * Emergency dump, into storage of our own: this runs on a crash path, so it must not depend
+   * on a permission, nor on a volume being mounted.
+   *
+   * @param context
+   *          an app context; null is tolerated (nothing is written)
+   * @param e
+   *          the throwable to record
+   */
+  protected static void emergencyDump(final Context context, final Throwable e) {
+    if (context == null) {
+      return;
+    }
+    final File external = context.getExternalFilesDir(null);
+    final File dumpFile = new File(
+        external != null ? external : context.getFilesDir(), "error.txt");
+    try (final PrintWriter print = new PrintWriter(new FileWriter(dumpFile))) {
+      e.printStackTrace(print);
+    } catch (final IOException io) {
+      Log.w(HTTrackActivity.class.getSimpleName(), "could not write " + dumpFile, io);
+    }
+  }
+
+  /**
+   * Describe a throwable that aborted a crawl, for the finished panel.
+   *
+   * @param e
+   *          the throwable to describe
+   * @return plain text, not HTML-escaped
+   */
+  static String describeCrash(final Throwable e) {
+    final String detail = e.getMessage();
+    return detail != null && !detail.isEmpty()
+        ? e.getClass().getName() + ": " + detail
+        : e.getClass().getName();
+  }
+
+  /**
+   * Build the top index.
+   * 
+   * @return 1 upon success
+   */
+  protected synchronized int buildTopIndex() {
+    return buildTopIndex(getApplicationContext(), getProjectRootFile(),
+        getResourceFile());
+  }
+
+  /**
+   * Build the top index, synchronized because a browse-all tap and a finishing run race here.
+   *
+   * @param context
+   *          Any context, used to dump a native fault
+   * @param projectRoot
+   *          The directory holding every project
+   * @param resources
+   *          The extracted HTML resource directory
+   * @return 1 upon success
+   */
+  protected static synchronized int buildTopIndex(final Context context,
+      final File projectRoot, final File resources) {
+    try {
+      return HTTrackLib.buildTopIndex(projectRoot, resources);
+    } catch (final Throwable t) {
+      // The fault is latched; report it and let the app end the process on its way out.
+      Log.e(HTTrackActivity.class.getSimpleName(), "could not build top index", t);
+      emergencyDump(context, t);
+      return 0;
+    }
+  }
+
+  /**
+   * The runner fragment class.<br />
+   * Thanks to Alex Lockwood for the useful hints regarding fragments!
+   */
+  public static class RunnerFragment extends Fragment {
+    protected Runner runner;
+
+    public RunnerFragment() {
+    }
+
+    @Override
+    public void onCreate(final Bundle savedInstanceState) {
+      super.onCreate(savedInstanceState);
+
+      // Retain this fragment across configuration changes.
+      setRetainInstance(true);
+    }
+
+    @Override
+    public void onDestroy() {
+      // Ensure the running job is killed when the fragment is disposed
+      if (runner != null) {
+        if (!runner.isEnded()) {
+          if (runner.stopMirror(true)) {
+            runner.sendAbortNotification();
+          }
+        }
+      }
+      super.onDestroy();
+    }
+
+    public void setParent(final HTTrackActivity parent) {
+      if (runner != null) {
+        throw new RuntimeException("can not attach twice");
+      }
+      // Create and execute the background task.
+      runner = new Runner(parent);
+      runner.execute();
+    }
+
+    // Is a live (non-ended) crawl still attached to this fragment?
+    public boolean hasLiveRunner() {
+      return runner != null && !runner.isEnded();
+    }
+
+    // Attach activity
+    @Override
+    public void onAttach(final Activity activity) {
+      super.onAttach(activity);
+      final HTTrackActivity parent = HTTrackActivity.class.cast(activity);
+      if (runner != null) {
+        // Reclaimed across a configuration change: hand the live task its new activity.
+        runner.setParent(parent);
+      } else {
+        // Restored empty after process death (setRetainInstance is a no-op there): the crawl is
+        // gone, so drop this stale fragment rather than auto-starting one the user never asked for.
+        Log.w(this.getClass().getSimpleName(),
+            "empty runner fragment restored after process death; discarding");
+        getParentFragmentManager().beginTransaction().remove(this)
+            .commitAllowingStateLoss();
+      }
+    }
+
+    // Detach activity
+    @Override
+    public void onDetach() {
+      super.onDetach();
+      // Null after a discarded process-death restore, where no runner was ever created.
+      if (runner != null) {
+        runner.detach();
+      }
+    }
+
+    public boolean stopMirror(final boolean force) {
+      return runner.stopMirror(force);
+    }
+
+    public HTTrackStats getLastStats() {
+      return runner.getLastStats();
+    }
+  }
+
+  /**
+   * Drives one CrawlRun from the retained fragment, and is the crawl's way back to a window.
+   * Every decision belongs to CrawlRun, so what is left here is the attach.
+   */
+  protected static class Runner extends AsyncTask<Void, Integer, Void>
+      implements CrawlRun.Owner {
+    // Application context, captured once and never detached, so a crash after detach() still dumps.
+    private final Context appContext;
+    private final CrawlRun crawl;
+    private final List<Runnable> pendingParentActions = new ArrayList<Runnable>();
+    private volatile boolean allowLan;
+    private HTTrackActivity parent;
+
+    /**
+     * Constructor.
+     *
+     * @param parent
+     *          the parent activity.
+     */
+    public Runner(final HTTrackActivity parent) {
+      appContext = parent.getApplicationContext();
+      crawl = new CrawlRun(appContext, this, HTTrackActivity.crawlMessages(appContext));
+      setParent(parent);
+    }
+
+    /**
+     * Set the parent activity.
+     *
+     * @param parent
+     *          the parent activity
+     */
+    public synchronized void setParent(final HTTrackActivity parent) {
+      this.parent = parent;
+      this.allowLan = parent.isAllowLanArchiving();
+      parent.cacheProgressStrings();
+      crawl.setMessages(HTTrackActivity.crawlMessages(parent));
+
+      // Execute pending actions now we are attached
+      if (pendingParentActions.size() != 0) {
+        for (final Runnable run : pendingParentActions) {
+          run.run();
+        }
+        pendingParentActions.clear();
+      }
+    }
+
+    /**
+     * Detach a parent.
+     */
+    public synchronized void detach() {
+      this.parent = null;
+    }
+
+    /** Trunk to parent's sendAbortNotification(). **/
+    public synchronized void sendAbortNotification() {
+      if (parent != null) {
+        parent.sendAbortNotification();
+      }
+    }
+
+    /* Background task. */
+    @Override
+    protected Void doInBackground(final Void... arg0) {
+      try {
+        HTTrackLib.setAllowLanArchiving(allowLan);
+        crawl.runMirror();
+      } catch (final Throwable e) {
+        // Last resort: CrawlRun absorbs its own failures, this only covers what comes after.
+        HTTrackActivity.emergencyDump(appContext, e);
+        throw e;
+      } finally {
+        crawl.end();
+      }
+      return null;
+    }
+
+    @Override
+    public synchronized void checkAttached() throws IOException {
+      if (parent == null) {
+        throw new IOException("no parent!");
+      }
+    }
+
+    @Override
+    public synchronized File target() {
+      return parent != null ? parent.getTargetFile() : null;
+    }
+
+    @Override
+    public synchronized File projectRoot() {
+      return parent != null ? parent.getProjectRootFile() : null;
+    }
+
+    @Override
+    public synchronized File resources() {
+      return parent != null ? parent.getResourceFile() : null;
+    }
+
+    @Override
+    public synchronized File createProfileDirectory() throws IOException {
+      checkAttached();
+      return parent.createProfileDirectory();
+    }
+
+    @Override
+    public synchronized List<String> options() throws IOException {
+      checkAttached();
+      return parent.buildCommandline();
+    }
+
+    @Override
+    public boolean resumesInterrupted() {
+      // Nothing reschedules an in-activity crawl, so the user's own Continue or Update stands.
+      return false;
+    }
+
+    @Override
+    public synchronized void serializeProfile(final FileChannel channel, final File profile)
+        throws IOException {
+      checkAttached();
+      parent.serialize(channel, profile);
+    }
+
+    @Override
+    public void onProgress(final String[] lines) {
+      postProgressLines(lines);
+    }
+
+    @Override
+    public void onStats(final HTTrackStats stats) {
+      final HTTrackActivity attached;
+      synchronized (this) {
+        attached = parent;
+      }
+      if (attached == null) {
+        return;
+      }
+      // Formatted on the crawl thread, as it always was; only the posting hops to the main one.
+      postProgressLines(attached.formatProgress(stats));
+    }
+
+    /* The one way to the pane, so a detach while a refresh was being laid out drops it. */
+    private synchronized void postProgressLines(final String[] lines) {
+      if (parent != null) {
+        parent.setProgressLines(lines);
+      }
+    }
+
+    /* Queued when detached, since only a pane can show the finished message. */
+    @Override
+    public synchronized void onFinished(final String displayMessage, final long errorsCount,
+        final File mirrorFolder) {
+      if (parent != null) {
+        parent.displayFinishedPanel(displayMessage, errorsCount, mirrorFolder);
+      } else {
+        pendingParentActions.add(new Runnable() {
+          @Override
+          public void run() {
+            parent.displayFinishedPanel(displayMessage, errorsCount, mirrorFolder);
+          }
+        });
+      }
+    }
+
+    /**
+     * Stop the mirror.
+     */
+    public boolean stopMirror(final boolean force) {
+      return crawl.stopMirror(force);
+    }
+
+    /**
+     * Has the mirror stopped ?
+     */
+    public boolean isEnded() {
+      return crawl.isEnded();
+    }
+
+    /**
+     * Get last statistics
+     *
+     * @return last statistics (or @c null if none)
+     */
+    public HTTrackStats getLastStats() {
+      return crawl.getLastStats();
+    }
+  }
+
+  /* A string resource that must exist, since a null one would reach the user as "null". */
+  private static String requireString(final Context context, final int id) {
+    final String s = context.getString(id);
+    if (s == null) {
+      throw new NullPointerException("null string #" + id);
+    }
+    return s;
+  }
+
+  private String requireString(final int id) {
+    return requireString(this, id);
+  }
+
+  /**
+   * The messages the crawl produces itself, re-read on every attach.
+   *
+   * @param context
+   *          any context of this app, since the job owner has no activity
+   * @return the messages, in the language in force now
+   */
+  static CrawlRun.Messages crawlMessages(final Context context) {
+    return new CrawlRun.Messages(requireString(context, R.string.creating_project),
+        requireString(context, R.string.starting_mirror),
+        requireString(context, R.string.self_contained_conflict),
+        requireString(context, R.string.mirror_already_in_progress),
+        requireString(context, R.string.engine_faulted),
+        requireString(context, R.string.mirror_finished));
+  }
+
+  /* Read once per attach rather than per refresh, which the engine drives faster than the UI. */
+  void cacheProgressStrings() {
+    string_bytes_saved = requireString(R.string.bytes_saved);
+    string_links_scanned = requireString(R.string.links_scanned);
+    string_time = requireString(R.string.time);
+    string_files_written = requireString(R.string.files_written);
+    string_transfer_rate = requireString(R.string.transfer_rate);
+    string_files_updated = requireString(R.string.files_updated);
+    string_active_connections = requireString(R.string.active_connections);
+    string_errors = requireString(R.string.errors);
+    string_connect = requireString(R.string.connect);
+    string_ready = requireString(R.string.ready);
+  }
+
+  /**
+   * Lay one engine refresh out as the progress pane's lines.
+   *
+   * @param stats
+   *          the statistics to render, never null
+   * @return the lines to post
+   */
+  String[] formatProgress(final HTTrackStats stats) {
+    // build stats infos
+    final String sep = " • ";
+    final StringBuilder str = new StringBuilder();
+    str.append("<b>");
+    str.append(string_bytes_saved);
+    str.append("</b>: ");
+    str.append(stats.bytesWritten);
+    str.append(sep);
+    str.append("<b>");
+    str.append(string_links_scanned);
+    str.append("</b>: ");
+    str.append(stats.linksScanned);
+    str.append("/");
+    str.append(stats.linksTotal);
+    str.append(" (+");
+    str.append(stats.linksBackground);
+    str.append(")<br />");
+    /* */
+    str.append("<b>");
+    str.append(string_time);
+    str.append("</b>: ");
+    str.append(stats.elapsedTime);
+    str.append(sep);
+    str.append("<b>");
+    str.append(string_files_written);
+    str.append("</b>: ");
+    str.append(stats.filesWritten);
+    str.append(" (+");
+    str.append(stats.filesWrittenBackground);
+    str.append(")<br />");
+    /* */
+    str.append("<b>");
+    str.append(string_transfer_rate);
+    str.append("</b>: ");
+    str.append(stats.transferRate);
+    str.append(" (");
+    str.append(stats.totalTransferRate);
+    str.append(")");
+    str.append(sep);
+    str.append("<b>");
+    str.append(string_files_updated);
+    str.append("</b>: ");
+    str.append(stats.filesUpdated);
+    str.append("<br />");
+    /* */
+    str.append("<b>");
+    str.append(string_active_connections);
+    str.append("</b>: ");
+    str.append(stats.socketsCount);
+    str.append(sep);
+    str.append("<b>");
+    str.append(string_errors);
+    str.append("</b>:");
+    str.append(stats.errorsCount);
+    /* */
+    if (stats.elements != null && stats.elements.length != 0) {
+      str.append("<br />");
+      str.append("<br />");
+
+      int maxElts = 32; // limit the number of displayed items
+      for (final Element element : stats.elements) {
+        if (element == null || element.address == null
+            || element.filename == null) {
+          continue;
+        }
+        if (--maxElts == 0) {
+          break;
+        }
+
+        // URL (server-controlled: escape so markup/entities stay literal)
+        str.append("<i>");
+        str.append(TextUtils.htmlEncode(element.address));
+        str.append(TextUtils.htmlEncode(element.path));
+        str.append("</i>");
+        str.append(" → ");
+
+        // state
+        switch (element.state) {
+        case Element.STATE_CONNECTING:
+          str.append(string_connect);
+          break;
+        case Element.STATE_DNS:
+          str.append("dns");
+          break;
+        case Element.STATE_FTP:
+          str.append("ftp");
+          break;
+        case Element.STATE_READY:
+          str.append("<b>");
+          str.append(string_ready);
+          str.append("</b>");
+          break;
+        case Element.STATE_RECEIVE:
+          if (element.totalSize > 0) {
+            final long completion = (100 * element.size + element.totalSize / 2)
+                / element.totalSize;
+            str.append(completion);
+            str.append("%");
+          } else {
+            str.append(element.size);
+            str.append("B");
+          }
+          break;
+        default:
+          str.append("???");
+          break;
+        }
+
+        // Next line
+        str.append("<br />");
+      }
+    }
+
+    // Final string
+    final String message = str.toString();
+    return brHtmlPattern.split(message);
+  }
+
+  /**
+   * Get the profile target file for the current project.
+   * 
+   * @return The profile target file.
+   */
+  protected File getProfileFile() {
+    final File target = getTargetFile();
+    if (target != null) {
+      return getProfileFile(target);
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Get the profile cache file for the current project.
+   * 
+   * @return The profile cache file.
+   */
+  protected File getCacheFile() {
+    final File target = getTargetFile();
+    if (target != null) {
+      return getCacheFile(target);
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Is there an existing profile yet ?
+   * 
+   * @return true if there is a winprofile.ini file
+   */
+  protected boolean hasProfileFile() {
+    final File profile = getProfileFile();
+    return profile != null && profile.exists();
+  }
+
+  /**
+   * Is there an existing cache yet ?
+   * 
+   * @return true if there is a new.zip cache file
+   */
+  protected boolean hasCacheFile() {
+    final File profile = getCacheFile();
+    return profile != null && profile.exists();
+  }
+
+  /**
+   * Does a crawl that ended this way leave the mirror resumable ?
+   *
+   * @param stopped
+   *          Was the crawl cut short, by the user or by a cap the engine enforces itself ?
+   * @param engineCode
+   *          The engine return code; nonzero means it gave up rather than finished.
+   * @param transportFailures
+   *          See HTTrackStats.transportFailures.
+   * @return true if the project should reopen offering "Continue an interrupted download"
+   */
+  protected static boolean leavesPendingWork(final boolean stopped, final int engineCode,
+      final long transportFailures) {
+    // The error count is not a criterion, because the engine returns 0 once its queue is drained
+    // and a server's error leaves nothing to fetch. A failed transfer does leave something.
+    return stopped || engineCode != 0 || transportFailures != 0;
+  }
+
+  /**
+   * The marker a stopped or aborted crawl leaves behind.
+   *
+   * @param target
+   *          The project directory
+   * @return The lock file
+   */
+  protected static File getInterruptedLockFile(final File target) {
+    return new File(new File(target, "hts-cache"), "interrupted.lock");
+  }
+
+  /**
+   * Interrupted profile ?
+   *
+   * @param target
+   *          The project directory
+   * @return true if the mirror was interrupted
+   */
+  protected static boolean isInterruptedProfile(final File target) {
+    // The engine's own lock only outlives a crawl it never got to end, such as a killed process.
+    return new File(target, "hts-in_progress.lock").exists()
+        || getInterruptedLockFile(target).exists();
+  }
+
+  /**
+   * Interrupted profile ?
+   * 
+   * @return true if the mirror was interrupted
+   */
+  protected boolean isInterruptedProfile() {
+    final File target = getTargetFile();
+    return target != null && isInterruptedProfile(target);
+  }
+
+  /**
+   * Set the "interrupted" flag.
+   *
+   * @param target
+   *          The project directory
+   * @param interrupted
+   *          Interrupted mirror ?
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  protected static void setInterruptedProfile(final File target,
+      final boolean interrupted) throws IOException {
+    final File lock = getInterruptedLockFile(target);
+    if (interrupted) {
+      final FileWriter wr = new FileWriter(lock);
+      wr.close();
+    } else {
+      lock.delete();
+    }
+  }
+
+  /**
+   * Get the profile target file for a given project.
+   * 
+   * @return The profile target file.
+   * @param target
+   *          The project directory
+   * @return The profile file
+   */
+  protected static File getProfileFile(final File target) {
+    if (target != null) {
+      return new File(new File(target, "hts-cache"), "winprofile.ini");
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Get the cache file for a given project.
+   * 
+   * @return The profile target file.
+   * @param target
+   *          The project directory
+   * @return The cache file
+   */
+  protected static File getCacheFile(final File target) {
+    if (target != null) {
+      return new File(new File(target, "hts-cache"), "new.zip");
+    } else {
+      return null;
+    }
+  }
+
+  /** Make directorie(s) if necessary. **/
+  static boolean mkdirs(final File target) {
+    return target.mkdirs() || target.isDirectory();
+  }
+
+  /** Make directorie(s) if necessary. **/
+  private static boolean mkdirsRetry(final File target) {
+    if (mkdirs(target)) {
+      return true;
+    } else {
+      Log.d("httrack", "creation of " + target + " failed, retrying ...");
+
+      final File parent = target.getParentFile();
+      if (parent != null && !parent.exists()) {
+        if (!mkdirs(parent)) {
+          Log.d("httrack", "creation of " + parent + " failed");
+        }
+      }
+      if (target.mkdir()) {
+        Log.d("httrack", "creation of " + target + " succeeded");
+        return true;
+      } else {
+        Log.d("httrack", "creation of " + target + " failed");
+        return false;
+      }
+    }
+  }
+
+  /** make the given file readable/writabe. **/
+  static boolean setFileReadWrite(final File target) {
+    // return target.setReadable(true) && target.setWritable(true);
+    return true;
+  }
+
+  /**
+   * Create the profile directory.
+   * 
+   * @return The profile file to be created
+   * @throws IOException
+   *           Upon error
+   */
+  protected synchronized File createProfileDirectory() throws IOException {
+    final File target = getTargetFile();
+    final File profile = getProfileFile();
+    if (target == null || profile == null) {
+      throw new IOException("No project defined yet");
+    }
+    final File cache = profile.getParentFile();
+
+    // Validate path
+    if (!HTTrackActivity.mkdirs(target)) {
+      throw new IOException("Unable to create " + target.getAbsolutePath());
+    }
+    // Create cache for winprofile.ini
+    else if (!HTTrackActivity.mkdirs(cache)) {
+      throw new IOException("Unable to create " + cache);
+    }
+    HTTrackActivity.setFileReadWrite(target);
+    HTTrackActivity.setFileReadWrite(cache);
+
+    return profile;
+  }
+
+  /**
+   * Serialize current profile to disk.
+   * 
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  protected synchronized void serialize() throws IOException {
+    // Write settings
+    final File profile = createProfileDirectory();
+    mapper.serialize(profile);
+    HTTrackActivity.setFileReadWrite(profile);
+  }
+
+  /**
+   * Serialize current profile to an existing channel, left open.
+   * 
+   * @param profile
+   *          The existing profile whose stated keys must be preserved; not
+   *          necessarily where the channel writes.
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  protected synchronized void serialize(final FileChannel channel,
+      final File profile) throws IOException {
+    mapper.serialize(channel, profile);
+  }
+
+  /**
+   * Unserialize profile from disk.
+   * 
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  protected void unserialize() throws IOException {
+    final File profile = getProfileFile();
+    mapper.unserialize(profile);
+  }
+
+  /**
+   * Is a crawl still actually running, under either owner? False after process death, where the
+   * session is empty and the fragment comes back without its runner.
+   */
+  protected boolean hasLiveRunner() {
+    if (MirrorSession.get().live() != null) {
+      return true;
+    }
+    // The fragment is live from the moment it is added, which is before its crawl reaches the slot.
+    final Fragment f = getSupportFragmentManager().findFragmentByTag(RUNNER_FRAGMENT_TAG);
+    return f instanceof RunnerFragment && ((RunnerFragment) f).hasLiveRunner();
+  }
+
+  /**
+   * Stop the crawl, whichever owner drives it.
+   *
+   * @param force
+   *          true to cut the transfers short rather than let them finish
+   * @return true when the stop reached the engine
+   */
+  private boolean stopCrawl(final boolean force) {
+    boolean stopSent = false;
+    boolean ownerAnswered = false;
+    if (runner != null) {
+      ownerAnswered = true;
+      stopSent = runner.stopMirror(force);
+    } else {
+      final MirrorSession.Crawl crawl = MirrorSession.get().live();
+      if (crawl != null) {
+        ownerAnswered = true;
+        stopSent = crawl.stopMirror(force);
+      }
+    }
+    // The engine's stop leaves the job scheduled, so only the cancel can abandon the mirror.
+    if (JobStopPolicy.cancelsScheduledJob(force, ownerAnswered)) {
+      MirrorJobService.cancel(this);
+    }
+    return stopSent;
+  }
+
+  /* Is the crawl scheduled and nothing more, so no engine and no worker thread exist yet? */
+  private boolean waitsForNetwork() {
+    return HandoverPolicy.waitsForNetwork(MirrorSession.get().live() != null,
+        MirrorJobService.isPending(this));
+  }
+
+  /* Draw what a crawl already under way has reported, so an attaching window is never frozen. */
+  private void attachToLiveCrawl() {
+    final MirrorSession session = MirrorSession.get();
+    final HTTrackStats stats = session.lastStats();
+    final MirrorSession.Verdict verdict = session.heldVerdict();
+    switch (HandoverPolicy.attaches(session.live() != null, verdict != null, stats != null,
+        MirrorJobService.isPending(this))) {
+    case FINISHED:
+      displayFinishedPanel(verdict.message, verdict.errorsCount, verdict.mirrorFolder);
+      break;
+    case PROGRESS:
+      setProgressLines(formatProgress(stats));
+      break;
+    case WAITING:
+      setProgressLines(new String[] { getString(R.string.waiting_for_network) });
+      break;
+    default:
+      break;
+    }
+  }
+
+  /**
+   * Hand the crawl to the job that outlives this window.
+   *
+   * @return true when the job owns the crawl, so this activity must not start one
+   */
+  protected synchronized boolean scheduleMirrorJob() {
+    if (!CrawlOwnerPolicy.startsNewCrawl(MirrorSession.get().live() != null,
+        MirrorJobService.isPending(this))) {
+      // Scheduling over a live job id would cancel the execution it is already running.
+      return true;
+    }
+    try {
+      // Written here, while the widgets are live, so the headless job only takes the lock.
+      serialize();
+    } catch (final IOException io) {
+      Log.w(getClass().getSimpleName(), "could not write the profile before scheduling", io);
+      return false;
+    }
+    return MirrorJobService.schedule(this, mapper.getProjectName(), getTargetFile(),
+        getProjectRootFile(), getResourceFile(), buildCommandline(), isAllowLanArchiving());
+  }
+
+  protected boolean isAllowLanArchiving() {
+    return getSharedPreferences(PREFS_NAME, 0).getBoolean(ALLOW_LAN_NAME, false);
+  }
+
+  private void wireAllowLanArchiving() {
+    final CheckBox box = CheckBox.class.cast(findViewById(R.id.checkAllowLanArchiving));
+    if (box == null) {
+      return;
+    }
+    box.setChecked(isAllowLanArchiving());
+    box.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+      @Override
+      public void onCheckedChanged(final CompoundButton button, final boolean checked) {
+        getSharedPreferences(PREFS_NAME, 0).edit()
+            .putBoolean(ALLOW_LAN_NAME, checked).apply();
+      }
+    });
+  }
+
+  /**
+   * Start the runner
+   */
+  protected synchronized void startRunner() {
+    // First attempt to reclaim a running one (orientation change)
+    if (runner == null) {
+      final FragmentManager fm = getSupportFragmentManager();
+      runner = (RunnerFragment) fm.findFragmentByTag(RUNNER_FRAGMENT_TAG);
+      // onAttach() should be called.
+    }
+    // Then, create one if necessary
+    if (runner == null) {
+      final FragmentManager fm = getSupportFragmentManager();
+      runner = new RunnerFragment();
+      runner.setParent(this);
+      fm.beginTransaction().add(runner, RUNNER_FRAGMENT_TAG).commit();
+    }
+  }
+
+  /**
+   * Apply the screen-on option. The flag lapses by itself once this window stops being visible.
+   */
+  private void refreshKeepScreenOn() {
+    final boolean keep = ScreenOnPolicy.keepScreenOn(
+        getSharedPreferences(PREFS_NAME, 0).getBoolean(KEEP_SCREEN_ON_NAME, false),
+        pane_id == LAYOUT_MIRROR_PROGRESS, hasLiveRunner());
+    if (keep) {
+      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    } else {
+      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+  }
+
+  /**
+   * Offer the screen-on option on the progress pane, and remember the tick.
+   */
+  private void wireKeepScreenOn() {
+    final CheckBox box = CheckBox.class.cast(findViewById(R.id.checkKeepScreenOn));
+    // Set before the listener, so inflating the pane does not write the preference back.
+    box.setChecked(getSharedPreferences(PREFS_NAME, 0).getBoolean(KEEP_SCREEN_ON_NAME, false));
+    box.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+      @Override
+      public void onCheckedChanged(final CompoundButton button, final boolean checked) {
+        getSharedPreferences(PREFS_NAME, 0).edit()
+            .putBoolean(KEEP_SCREEN_ON_NAME, checked).apply();
+        refreshKeepScreenOn();
+      }
+    });
+  }
+
+  /**
+   * We just entered in a new pane.
+   */
+  protected void onEnterNewPane() {
+    switch (layouts[pane_id]) {
+    case R.layout.activity_startup:
+      final TextView text = TextView.class.cast(this
+          .findViewById(R.id.fieldDisplay));
+      final TextView textDebug = TextView.class.cast(this
+          .findViewById(R.id.fieldDebug));
+
+      // Welcome message.
+      final StringBuilder html = new StringBuilder(
+          getString(R.string.welcome_message).replace("\n-", "\n•")
+              .replace("\n", "<br />")
+              .replace("RaufixTeam WebTools", "<b>RaufixTeam WebTools</b>"));
+
+      // Nothing else on a cold launch points at a project a crawl left unfinished.
+      final String unfinished = ResumePolicy.resumeNotice(
+          getString(R.string.unfinished_downloads_xx),
+          getString(R.string.unfinished_downloads_more_xx),
+          getProjectRootFile(), getProjectNames());
+      if (unfinished != null) {
+        html.append("<br /><br /><b>").append(TextUtils.htmlEncode(unfinished))
+            .append("</b>");
+      }
+      text.setText(Html.fromHtml(html.toString()));
+
+      // Debugging and information.
+      final StringBuilder str = new StringBuilder();
+      str.append("<i>");
+      if (version != null) {
+        // The app's own name leads: versionName and the engine version can differ.
+        str.append("<br />Version: ");
+        str.append(versionName);
+        str.append(" (build ");
+        str.append(versionCode);
+        str.append(", engine ");
+        str.append(version);
+        str.append(versionFeatures);
+        str.append(")");
+      }
+      // str.append(" • Path: ");
+      // str.append(getProjectRootFile().getAbsolutePath());
+      str.append(" • IPv6: ");
+      final InetAddress addrV6 = getIPv6Address();
+      str.append(addrV6 != null ? ("YES (" + addrV6.getHostAddress() + ")")
+          : "NO");
+      str.append("</i>");
+      textDebug.setText(Html.fromHtml(str.toString()));
+
+      // Enable or disable browse & cleanup button depending on existing
+      // project(s)
+      View.class.cast(this.findViewById(R.id.buttonClear)).setEnabled(
+          !CleanupTitlePolicy.refusesDelete(isCrawlLive(), hasProjectNames()));
+      View.class.cast(this.findViewById(R.id.buttonBrowseAll)).setEnabled(
+          hasProjectRootIndexFile());
+
+      break;
+    case R.layout.activity_proj_name:
+      // Refresh suggest
+      refreshprojectNameSuggests();
+
+      /* Base path */
+      TextView.class.cast(findViewById(R.id.fieldBasePath)).setText(
+          getProjectRootFile().getAbsolutePath());
+      refreshStorageAccessHints();
+
+      // "Next" button is disabled if no project name is defined
+      switchEmptyProjectName = !OptionsMapper.isStringNonEmpty(mapper
+          .getProjectName());
+      View.class.cast(findViewById(R.id.buttonNext)).setEnabled(
+          !switchEmptyProjectName);
+
+      /*
+       * Prior to Honeycomb (TODO FIXME: check that), the android browser is
+       * unable to browse local file:// pages embedding spaces (%20 or +)
+       * Therefore, warn the user.
+       */
+      warnPreHoneycombSpaceIssue = android.os.Build.VERSION.SDK_INT < VERSION_CODES.HONEYCOMB;
+
+      /* Add text watcher for the "Next" button. */
+      final AutoCompleteTextView name = AutoCompleteTextView.class.cast(this
+          .findViewById(R.id.fieldProjectName));
+      name.addTextChangedListener(new TextWatcher() {
+        @Override
+        public void onTextChanged(final CharSequence s, final int start,
+            final int before, final int count) {
+          // Warn when seeing space
+          if (warnPreHoneycombSpaceIssue) {
+            for (int i = start; i < start + count; i++) {
+              if (s.charAt(i) == ' ') {
+                showNotification(getString(R.string.warning_space_in_filename),
+                    true);
+                warnPreHoneycombSpaceIssue = false;
+                break;
+              }
+            }
+          }
+        }
+
+        @Override
+        public void afterTextChanged(final Editable s) {
+          // Enable/disable next button
+          boolean empty = true;
+          for (int i = 0; i < s.length(); i++) {
+            if (Character.isLetterOrDigit(s.charAt(i))) {
+              empty = false;
+              break;
+            }
+          }
+          if (empty != switchEmptyProjectName) {
+            switchEmptyProjectName = empty;
+            View.class.cast(findViewById(R.id.buttonNext)).setEnabled(!empty);
+          }
+
+          // (re) Set category
+          final String category = getProjectCategory(s.toString());
+          TextView.class.cast(findViewById(R.id.fieldProjectCategory)).setText(
+              category != null ? category : "");
+        }
+
+        // NOOP
+        @Override
+        public void beforeTextChanged(final CharSequence s, final int start,
+            final int count, final int after) {
+        }
+      });
+      break;
+    case R.layout.activity_proj_setup:
+      wireAllowLanArchiving();
+      // Existing cache ?
+      final boolean hasProfile = hasCacheFile();
+      View.class.cast(this.findViewById(R.id.radioAction)).setEnabled(
+          hasProfile);
+      View.class.cast(this.findViewById(R.id.radioAction)).setVisibility(
+          hasProfile ? View.VISIBLE : View.GONE);
+      if (hasProfile) {
+        // Update is the default unless something was broken
+        RadioGroup.class.cast(this.findViewById(R.id.radioAction)).check(
+            isInterruptedProfile() ? R.id.radioItemContinue
+                : R.id.radioItemUpdate);
+      } else {
+        // Reset
+        RadioGroup.class.cast(this.findViewById(R.id.radioAction)).check(-1);
+      }
+      break;
+    case R.layout.activity_mirror_progress:
+      wireKeepScreenOn();
+      // Asked at crawl start, not at launch.
+      ensureNotificationsAreAllowed();
+      final boolean jobOwns = CrawlOwnerPolicy.ownsInJob(android.os.Build.VERSION.SDK_INT);
+      if (CrawlOwnerPolicy.startsInActivity(jobOwns, jobOwns && scheduleMirrorJob())) {
+        startRunner();
+      }
+      // Posted, not drawn inline: nothing is laid out yet, so an inline draw cuts every line.
+      setProgressLines(new String[] { getString(waitsForNetwork()
+          ? R.string.waiting_for_network : R.string.starting_worker_thread) });
+      if (runner != null || hasLiveRunner()) {
+        ProgressBar.class.cast(findViewById(R.id.progressMirror))
+            .setVisibility(View.VISIBLE);
+      }
+      break;
+    case R.layout.activity_mirror_finished:
+      // Ensure the engine has stopped running
+      stopCrawl(true);
+
+      // Enable browse button if index.html exists
+      final boolean hasIndex = hasTargetIndexFile();
+      View.class.cast(this.findViewById(R.id.buttonBrowse))
+          .setEnabled(hasIndex);
+      if (!hasIndex) {
+        final File index = getTargetIndexFile();
+        Log.d(getClass().getSimpleName(), "no index found ("
+            + (index != null ? index.getAbsolutePath() : "unknown location")
+            + ")");
+        final String template = getString(R.string.no_index_html_in_xx);
+        if (template == null) {
+          throw new RuntimeException("R.string.no_index_html_in_xx is null");
+        }
+        final File target = getTargetFile();
+        if (target != null) {
+          final String warning = template.replace("%s", target.getPath());
+          showNotification(warning);
+        }
+      }
+
+      // Enable logs if present
+      final boolean hasLog = hasTargetLogFile();
+      View.class.cast(this.findViewById(R.id.buttonLogs)).setEnabled(hasLog);
+      final View exportBtn = this.findViewById(R.id.buttonExportSaf);
+      if (exportBtn != null) {
+        final File target = getTargetFile();
+        exportBtn.setEnabled(target != null && target.isDirectory());
+      }
+      if (!hasLog) {
+        final File log = getTargetLogFile();
+        Log.d(getClass().getSimpleName(),
+            "no log found ("
+                + (log != null ? log.getAbsolutePath() : "unknown location")
+                + ")");
+      }
+
+      // Final stats
+      if (runner != null) {
+        final HTTrackStats lastStats = runner.getLastStats();
+        if (lastStats != null && lastStats.errorsCount != 0) {
+          // TODO
+        }
+      }
+      break;
+    }
+  }
+
+  /**
+   * Exit button.
+   */
+  protected void onFinish() {
+    // FIXME TODO CRASHES!
+    // runOnUiThread(new Runnable() {
+    // public void run() {
+    // finish();
+    // }
+    // });
+  }
+
+  /**
+   * Get a specific field text.
+   * 
+   * @param id
+   *          The field ID.
+   * @return the associated text
+   */
+  private String getFieldText(final int id) {
+    return widgetDataExchange.getFieldText(id);
+  }
+
+  /**
+   * Set a specific field text value.
+   * 
+   * @param id
+   *          The field ID.
+   * @param value
+   *          the associated text
+   */
+  private void setFieldText(final int id, final String value) {
+    widgetDataExchange.setFieldText(id, value);
+  }
+
+  /*
+   * Add an empty TextView to "in progress" window.
+   */
+  private TextView addEmptyLineToLayout(final LinearLayout layout) {
+    final TextView text = new TextView(this);
+
+    // Span to the width
+    text.setWidth(LayoutParams.FILL_PARENT);
+    text.setHeight(LayoutParams.WRAP_CONTENT);
+
+    // Single line, with optional ellipsis (...) on the middle
+    text.setSingleLine();
+    text.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+    layout.addView(text);
+
+    // Return new widget
+    return text;
+  }
+
+  /*
+   * Remove lines from the "in progress" window.
+   */
+  private void removeLinesFromLayout(final LinearLayout layout,
+      final int fromPosition) {
+    if (fromPosition < layout.getChildCount()) {
+      layout.removeViews(fromPosition, layout.getChildCount() - fromPosition);
+    }
+  }
+
+  /*
+   * Set the "progress" layout lines. To be run in any thread.
+   */
+  protected void setProgressLines(final String[] lines) {
+    if (progressLines.offerNeedsPost(lines) && !handlerUI.post(progressLinesTask)) {
+      // Unreachable short of process death, since post() only refuses once the Looper quits.
+      progressLines.disarm();
+    }
+  }
+
+  /*
+   * Set the "progress" layout lines. Must be run in the GUI thread.
+   */
+  private void setProgressLinesInternal(final String[] lines) {
+    // Get line divider position of the bottom coordinate
+    final View lineDivider = findViewById(R.id.buttonStop);
+    if (lineDivider == null) {
+      return ;
+    }
+    final int[] textPosition = new int[2];
+    final int[] linePosition = new int[2];
+    lineDivider.getLocationInWindow(linePosition);
+    final int lineYTopPosition = linePosition[1];
+
+    // Explode lines
+    final LinearLayout layout = LinearLayout.class
+        .cast(findViewById(R.id.layout));
+
+    // Remove any additional lines
+    removeLinesFromLayout(layout, lines.length);
+
+    // Add lines while we can
+    final int currSize = layout.getChildCount();
+    for (int i = 0; i < lines.length; i++) {
+      // Fetch or create next layout line.
+      final TextView text = i < currSize ? TextView.class.cast(layout
+          .getChildAt(i)) : addEmptyLineToLayout(layout);
+
+      // Stop adding lines if overlapping to the end of the screen
+      text.getLocationInWindow(textPosition);
+      final int height = text.getHeight();
+      final int textYBottomPosition = textPosition[1] + height;
+      if (textYBottomPosition >= lineYTopPosition) {
+        // Then cut everything remaining
+        removeLinesFromLayout(layout, i);
+
+        // Stop here
+        break;
+      }
+
+      // Set text (html-formatted) for this line
+      final String line = lines[i].trim();
+      if (line.length() != 0) {
+        text.setText(Html.fromHtml(line));
+      } else {
+        // Otherwise Android 3.0 does not insert any blank line
+        text.setText(Html.fromHtml("&nbsp;"));
+      }
+    }
+  }
+
+  /*
+   * Display the final "finished" panel.
+   */
+  protected void displayFinishedPanel(final String displayMessage,
+      final long errorsCount, final File mirrorFolder) {
+    handlerUI.post(new Runnable() {
+      @Override
+      public void run() {
+        // Final pane
+        setPane(LAYOUT_FINISHED);
+
+        // Fancy result message
+        if (displayMessage != null) {
+          final View view = findViewById(R.id.fieldDisplay);
+          if (view != null) {
+            final Spanned text = renderFinishedMessage(displayMessage, mirrorFolder);
+            TextView.class.cast(view).setText(text);
+            // Without a movement method the span is styled but never receives the tap.
+            TextView.class.cast(view).setMovementMethod(
+                text.getSpans(0, text.length(), ClickableSpan.class).length != 0
+                    ? LinkMovementMethod.getInstance() : null);
+          }
+        }
+        if (errorsCount != 0) {
+          final View view = findViewById(R.id.buttonLogs);
+          if (view != null) {
+            final Animation shake = AnimationUtils.loadAnimation(
+                HTTrackActivity.this, R.anim.scale);
+            view.startAnimation(shake);
+          }
+        }
+        /* If not visible, send a notification. */
+        if (!started) {
+          final String name = mapper.getProjectName();
+          final String finished = getString(R.string.mirror_finished);
+          /* FIXME TODO check intent */
+          final Intent current = getCurrentIntentReference();
+          sendSystemNotification(current, finished + ": " + name,
+              renderFinishedMessage(displayMessage, null));
+        }
+        // Drawn at last, so the session need not keep it for the window after this one.
+        MirrorSession.get().takeVerdict();
+      }
+    });
+  }
+
+  /* Rewrite our own mirror-path link to open folder, or drop it when folder is null, since a
+   * notification cannot follow a tap. */
+  private Spanned renderFinishedMessage(final String message, final File folder) {
+    final Spanned rendered = Html.fromHtml(message);
+    final SpannableStringBuilder text = new SpannableStringBuilder(rendered);
+    for (final URLSpan link : rendered.getSpans(0, rendered.length(), URLSpan.class)) {
+      if (!MIRROR_FOLDER_HREF.equals(link.getURL())) {
+        continue;
+      }
+      final int start = text.getSpanStart(link);
+      final int end = text.getSpanEnd(link);
+      final int flags = text.getSpanFlags(link);
+      text.removeSpan(link);
+      if (folder != null) {
+        text.setSpan(new ClickableSpan() {
+          @Override
+          public void onClick(final View widget) {
+            openFolderOrCopyPath(folder);
+          }
+        }, start, end, flags);
+      }
+    }
+    return text;
+  }
+
+  /** Whether the setup pane should (re)load the selected project's saved profile; see loadedProjectName. */
+  static boolean shouldReloadProfile(final String selectedName,
+      final String loadedName, final boolean dirty) {
+    return dirty || loadedName == null || !loadedName.equals(selectedName);
+  }
+
+  /**
+   * Validate the current pane
+   *
+   * @return true if the current pane is valid
+   */
+  protected boolean validatePane() {
+    switch (pane_id) {
+    case LAYOUT_START:
+      // Warn if no sdcard
+      ensureExternalStorage();
+      warnIfExternalStorageUnsuitable();
+      break;
+    case LAYOUT_PROJECT_NAME:
+      // Recompute storage target if necessary
+      if (!ensureExternalStorage()) {
+        warnIfExternalStorageUnsuitable();
+        return false;
+      }
+      // Continue if we could have a place to write to (even if we warned)
+
+      // Check project name
+      final String name = getFieldText(R.id.fieldProjectName);
+      if (OptionsMapper.isStringNonEmpty(name)) {
+        // Reload when the selection differs from the loaded profile (see shouldReloadProfile).
+        if (shouldReloadProfile(name, loadedProjectName, dirtyNamePane)) {
+          // Put the name in the map first so unserialize() can resolve the profile.
+          try {
+            mapper.resetMap();
+            setMap(R.id.fieldProjectName, name);
+            unserialize();
+          } catch (final IOException e) {
+            // Ignore (if not found)
+          } finally {
+            dirtyNamePane = false;
+            loadedProjectName = name;
+          }
+        }
+        // A crafted winprofile.ini can overwrite the name with a path that escapes the root.
+        if (!StoragePaths.isValidProjectName(mapper.getProjectName())) {
+          showNotification(getString(R.string.invalid_project_name), true);
+          return false;
+        }
+        return true;
+      }
+      return false;
+    case LAYOUT_PROJECT_SETUP:
+      final String rawUrls = getFieldText(R.id.fieldWebsiteURLs);
+      if (!OptionsMapper.isStringNonEmpty(rawUrls)) {
+        return false;
+      }
+      final boolean allowLan = isAllowLanArchiving();
+      for (final String token : rawUrls.trim().split("\\s+")) {
+        if (token.isEmpty()) {
+          continue;
+        }
+        final UrlSafetyPolicy.Verdict verdict = UrlSafetyPolicy.checkUrl(token, allowLan);
+        if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_UNSAFE_SCHEME) {
+          showNotification(getString(R.string.url_blocked_scheme), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_METADATA) {
+          showNotification(getString(R.string.url_blocked_metadata), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_LOCAL_OR_PRIVATE) {
+          showNotification(getString(R.string.url_blocked_local), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.INVALID_URL) {
+          showNotification(getString(R.string.url_invalid), true);
+          return false;
+        }
+      }
+      return true;
+    }
+    return true;
+  }
+
+  /**
+   * Validate the current pane with visual effects on error. Thanks to Sushant
+   * for the idea.
+   * 
+   * @return true if the current pane is valid
+   */
+  protected boolean validatePaneWithEffects(final boolean next) {
+    final boolean validated = validatePane();
+    if (!validated) {
+      final Animation shake = AnimationUtils.loadAnimation(this, R.anim.shake);
+      findViewById(next ? R.id.buttonNext : R.id.buttonPrevious)
+          .startAnimation(shake);
+    }
+    return validated;
+  }
+
+  /* Save current pane fieds into map. */
+  private void savePaneFields() {
+    if (pane_id != -1) {
+      for (final int id : fields[pane_id]) {
+        final String value = getFieldText(id);
+        setMap(id, value);
+      }
+    }
+  }
+
+  /* Load pane fields from map. */
+  private void loadPaneFields() {
+    // Entering a new pane: restore data
+    for (final int id : fields[pane_id]) {
+      final String value = getMap(id);
+      setFieldText(id, value);
+    }
+  }
+
+  private void setPane(final int position) {
+    // Only a new process can clear a fault reported from this panel.
+    if (NativeFaultPolicy.closeOnPaneChange(HTTrackLib.hasFaulted(), pane_id, position,
+        LAYOUT_FINISHED)) {
+      closeAfterNativeFault();
+      return;
+    }
+    if (pane_id != position) {
+      // Leaving a pane: save data
+      savePaneFields();
+
+      // Switch pane
+      pane_id = position;
+      stayAliveWhileMirroring.setEnabled(pane_id == LAYOUT_MIRROR_PROGRESS);
+      setContentView(layouts[pane_id]);
+
+      // Entering a new pane: restore data
+      loadPaneFields();
+
+      // Post-actions
+      onEnterNewPane();
+    }
+    // Off the progress pane, and past the end of a crawl, the display may sleep again.
+    refreshKeepScreenOn();
+  }
+
+  @Override
+  public boolean onCreateOptionsMenu(final Menu menu) {
+    // Inflate the menu; this adds items to the action bar if it is present.
+    if (pane_id != -1) {
+      getMenuInflater().inflate(R.menu.menu, menu);
+    }
+    return true;
+  }
+
+  /**
+   * "Next"
+   */
+  public void onClickNext(final View view) {
+    if (pane_id < layouts.length) {
+      if (validatePaneWithEffects(true)) {
+        setPane(pane_id + 1);
+      }
+    } else {
+      onFinish();
+    }
+  }
+
+  /**
+   * "Previous"
+   */
+  public void onClickPrevious(final View view) {
+    if (pane_id > 0) {
+      setPane(pane_id - 1);
+    }
+  }
+
+  /**
+   * Let the user pick a legacy mirror folder to copy in. The storage-access framework is the
+   * only way left to reach the old public location once we no longer hold storage permissions.
+   */
+  private void startLegacyMirrorImport() {
+    final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    try {
+      showNotification(getString(R.string.import_mirrors_prompt));
+      startActivityForResult(intent, ACTIVITY_IMPORT_TREE);
+    } catch (final Exception e) {
+      Log.w(getClass().getSimpleName(), "could not open the document-tree picker", e);
+      showNotification(getString(R.string.import_mirrors_none));
+    }
+  }
+
+  // Process-wide: a rotation recreates the activity, but the detached worker keeps copying.
+  private static final AtomicBoolean importInProgress = new AtomicBoolean();
+  private static final AtomicBoolean exportInProgress = new AtomicBoolean();
+  private volatile boolean browseAllInProgress;
+
+  /**
+   * Let the user pick any folder via Storage Access Framework to export the finished mirror.
+   */
+  public void onClickExportMirrorSaf(final View view) {
+    final File target = getTargetFile();
+    if (target == null || !target.isDirectory()) {
+      showNotification(getString(R.string.export_saf_no_target), true);
+      return;
+    }
+    final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+    try {
+      startActivityForResult(intent, ACTIVITY_EXPORT_TREE);
+    } catch (final Exception e) {
+      Log.w(getClass().getSimpleName(), "could not open SAF export picker", e);
+      showNotification(getString(R.string.import_mirrors_none), true);
+    }
+  }
+
+  private void exportMirrorToSaf(final Uri treeUri) {
+    final File target = getTargetFile();
+    if (target == null || !target.isDirectory()) {
+      showNotification(getString(R.string.export_saf_no_target), true);
+      return;
+    }
+    try {
+      getContentResolver().takePersistableUriPermission(treeUri,
+          Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    } catch (final SecurityException ignored) {
+      // Some providers grant transient write access without persistable flags; export still works.
+    }
+    if (!exportInProgress.compareAndSet(false, true)) {
+      showNotification(getString(R.string.export_saf_running));
+      return;
+    }
+    final Context appContext = getApplicationContext();
+    final String exportName = mapper.getProjectName();
+    try {
+      showNotification(getString(R.string.export_saf_running));
+      new Thread(new Runnable() {
+        @Override
+        public void run() {
+          String message;
+          try {
+            final SafMirrorExport.Result r =
+                SafMirrorExport.exportTree(appContext, treeUri, target, exportName);
+            if (r.isComplete()) {
+              message = appContext.getString(R.string.export_saf_done, r.copied);
+            } else {
+              message = appContext.getString(R.string.export_saf_partial, r.copied, r.failed);
+            }
+          } catch (final Throwable t) {
+            Log.w(getClass().getSimpleName(), "SAF export failed", t);
+            message = appContext.getString(R.string.export_saf_failed);
+          } finally {
+            exportInProgress.set(false);
+          }
+          deliverImportOutcome(appContext, message);
+        }
+      }, "saf-export").start();
+    } catch (final Throwable t) {
+      exportInProgress.set(false);
+      throw t;
+    }
+  }
+
+  /**
+   * Copy the picked tree into our Websites directory, entirely off the UI thread: even walking
+   * the tree to find "Websites" is one IPC per entry, too much for the main thread. The source
+   * is only read, never changed. Guarded against a second run while one is going, whose two
+   * threads would race on the same temp files.
+   */
+  private void importMirrorsFrom(final Uri treeUri) {
+    final ContentResolver resolver = getContentResolver();
+    resolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    final Context appContext = getApplicationContext();
+    final File dest = getProjectRootFile();
+    // Claim the guard last, so a synchronous throw above cannot wedge it.
+    if (!importInProgress.compareAndSet(false, true)) {
+      showNotification(getString(R.string.import_mirrors_running));
+      return;
+    }
+    // Release the process-wide guard if the worker never starts (e.g. OOM at thread creation);
+    // otherwise a failed launch would wedge it true for the rest of the process.
+    try {
+      showNotification(getString(R.string.import_mirrors_running));
+      new Thread(new Runnable() {
+        @Override
+        public void run() {
+          String message;
+          try {
+            message = runImport(appContext, resolver, treeUri, dest);
+          } catch (final Throwable t) {
+            // Even a StackOverflowError must still deliver a failure outcome, not die silently with
+            // the guard cleared and nothing shown.
+            Log.w(getClass().getSimpleName(), "import failed", t);
+            message = getString(R.string.import_mirrors_partial, 0, 0);
+          } finally {
+            importInProgress.set(false);
+          }
+          deliverImportOutcome(appContext, message);
+        }
+      }, "legacy-import").start();
+    } catch (final Throwable t) {
+      importInProgress.set(false);
+      throw t;
+    }
+  }
+
+  /** The copy itself, on the worker thread; returns the message to show. **/
+  private String runImport(final Context context, final ContentResolver resolver,
+      final Uri treeUri, final File dest) {
+    DocumentFile root = DocumentFile.fromTreeUri(context, treeUri);
+    if (root == null) {
+      return getString(R.string.import_mirrors_none);
+    }
+    // A picked "HTTrack" folder holds "Websites"; descend so project dirs keep their depth.
+    final DocumentFile websites = root.findFile("Websites");
+    if (websites != null && websites.isDirectory()) {
+      root = websites;
+    }
+    final LegacyMirrorImport.Source source =
+        new LegacyMirrorImport.DocumentFileSource(resolver, root);
+    if (LegacyMirrorImport.totalSize(source) > dest.getUsableSpace()) {
+      return getString(R.string.import_mirrors_no_space);
+    }
+    final LegacyMirrorImport.Result result = LegacyMirrorImport.copyTree(source, dest);
+    if (result.firstError() != null) {
+      Log.w(getClass().getSimpleName(), "import: " + result.firstError());
+    }
+    if (!result.isComplete()) {
+      return getString(R.string.import_mirrors_partial, result.copied, result.failed);
+    }
+    if (result.copied == 0 && result.skipped == 0) {
+      return getString(R.string.import_mirrors_none);
+    }
+    return getString(R.string.import_mirrors_done, result.copied, result.skipped);
+  }
+
+  /**
+   * Report the outcome on the main thread. Uses the application context and its own handler so
+   * the toast still shows if the activity was rotated away during a long copy; the project list
+   * is refreshed only when an activity is still around to hold it.
+   */
+  private void deliverImportOutcome(final Context appContext, final String message) {
+    new Handler(Looper.getMainLooper()).post(new Runnable() {
+      @Override
+      public void run() {
+        Toast.makeText(appContext, message, Toast.LENGTH_LONG).show();
+        if (!isFinishing() && !isDestroyed()) {
+          refreshprojectNameSuggests();
+        }
+      }
+    });
+  }
+
+  /**
+   * Once per install, point users at the import. No storage permission remains to detect the
+   * old folder, so this offers rather than asserts; "Not now" leaves it to ask again.
+   */
+  private void offerLegacyMirrorImportOnce() {
+    final SharedPreferences settings = getSharedPreferences(PREFS_NAME, 0);
+    if (settings.getBoolean(IMPORT_OFFERED_NAME, false)) {
+      return;
+    }
+    // Null both without access and with nothing to import; either way, stay silent.
+    if (StoragePaths.legacyMirrorRoot(sharedStorageRoot()) == null) {
+      return;
+    }
+    new AlertDialog.Builder(this)
+        .setMessage(R.string.import_mirrors_offer)
+        .setPositiveButton(R.string.import_mirrors_offer_yes, (dialog, which) -> {
+          settings.edit().putBoolean(IMPORT_OFFERED_NAME, true).apply();
+          startLegacyMirrorImport();
+        })
+        .setNegativeButton(R.string.import_mirrors_offer_later, null)
+        .setNeutralButton(R.string.import_mirrors_offer_never, (dialog, which) ->
+            settings.edit().putBoolean(IMPORT_OFFERED_NAME, true).apply())
+        .show();
+  }
+
+  /**
+   * Change base path
+   */
+  public void onClickBasePath(final View view) {
+    // Start new activity
+    final Intent intent = new Intent(this, FileChooserActivity.class);
+    fillExtra(intent);
+
+    // Only our own directory is left to browse, so there is no second root to offer.
+    intent.putExtra("com.httrack.android.defaultHTTrackPath",
+      getDefaultHTTrackPath());
+
+    startActivityForResult(intent, ACTIVITY_FILE_CHOOSER);
+  }
+
+  /**
+   * "Interrupt" or "Stop"
+   */
+  public void onClickStop(final View view) {
+    if (runner == null && waitsForNetwork()) {
+      // No engine ever started, so no run will show the finished pane; the cancel is the end.
+      stopCrawl(true);
+      setPane(LAYOUT_PROJECT_SETUP);
+      return;
+    }
+    if (runner != null || MirrorSession.get().live() != null) {
+      // Soft interrupt
+      if (!interruptRequested) {
+        stopCrawl(false);
+        interruptRequested = true;
+        final TextView text = (TextView) this.findViewById(R.id.buttonStop);
+        // Change text to "Stop"
+        text.setText(getString(R.string.cancel));
+        // Notice
+        showNotification(getString(R.string.finishing_pending_transfers), true);
+      }
+      // Hard interrupt
+      else {
+        stopCrawl(true);
+      }
+    }
+  }
+
+  /**
+   * "Options"
+   */
+  public void onClickOptions(final View view) {
+    // First save current pane settings
+    savePaneFields();
+
+    // Then start new activity
+    final Intent intent = new Intent(this, OptionsActivity.class);
+    fillExtra(intent);
+    intent.putExtra(MAP_NAME, mapper.serialize());
+    Log.d(getClass().getSimpleName(), "map size: " + mapper.size());
+    startActivityForResult(intent, ACTIVITY_OPTIONS);
+  }
+
+  /**
+   * Project name "..." button.
+   */
+  public void onClickMoreProjectName(final View view) {
+    final String[] names = getProjectNames();
+    if (names != null && names.length != 0) {
+      final Intent intent = new Intent(this, CleanupActivity.class);
+      fillExtra(intent);
+      intent.putExtra("com.httrack.android.projectNames", names);
+      intent.putExtra("com.httrack.android.action",
+          CleanupActivity.ACTION_SELECT);
+      startActivityForResult(intent, ACTIVITY_PROJECT_NAME_CHOOSER);
+    }
+  }
+
+  /**
+   * Where the engine keeps its own cookie jar for this project. Private storage, because the
+   * jar holds whatever session the crawl picked up, and with no file named the engine saves it
+   * beside the mirror, which every app on the device can read. Nothing here writes it.
+   *
+   * @return the file, or null until the project has a usable name
+   */
+  private File getLoginCookiesFile() {
+    return StoragePaths.loginCookiesFile(getFilesDir(), mapper.getProjectName());
+  }
+
+  /**
+   * "Log in with a browser"
+   */
+  public void onClickBrowserLogin(final View view) {
+    // The address field is this pane's, and the login opens what it holds right now.
+    savePaneFields();
+    final File bundles = StoragePaths.loginBundleDir(getFilesDir(), mapper.getProjectName());
+    if (bundles == null) {
+      Toast.makeText(this, R.string.browser_login_no_project, Toast.LENGTH_LONG).show();
+      return;
+    }
+    final String field = getMap(R.id.fieldWebsiteURLs);
+    final String url = BrowserLoginPolicy.startUrl(field);
+    if (url == null) {
+      Toast.makeText(this, R.string.browser_login_no_address, Toast.LENGTH_LONG).show();
+      return;
+    }
+    final Intent intent = new Intent(this, BrowserLoginActivity.class);
+    intent.putExtra(BrowserLoginActivity.EXTRA_URL, url);
+    intent.putExtra(BrowserLoginActivity.EXTRA_BUNDLE_DIR, bundles);
+    intent.putStringArrayListExtra(BrowserLoginActivity.EXTRA_CRAWL_HOSTS,
+        new ArrayList<String>(BrowserLoginPolicy.fieldHosts(field)));
+    startActivityForResult(intent, ACTIVITY_BROWSER_LOGIN);
+  }
+
+  /**
+   * Point the crawl at the login the browser window saved, or drop the bundle names from the
+   * address field when Forget ran.
+   */
+  private void applyBrowserLogin(final Intent data) {
+    final File cookies = getLoginCookiesFile();
+    final String bundleUrl = data.getStringExtra(BrowserLoginActivity.EXTRA_BUNDLE_URL);
+
+    if (data.getBooleanExtra(BrowserLoginActivity.EXTRA_FORGOTTEN, false)) {
+      setAddressField(BrowserLoginPolicy.withoutBundleNames(getMap(R.id.fieldWebsiteURLs)));
+      return;
+    }
+    if (cookies == null || bundleUrl == null || bundleUrl.length() == 0) {
+      return;
+    }
+    /* Older names come off first, because two bundles covering one site with different cookie
+       values make the engine refuse to start the crawl at all. The token to name is then read
+       from that same stripped text, so it is always a token the field still holds. */
+    final String stripped = BrowserLoginPolicy.withoutBundleNames(getMap(R.id.fieldWebsiteURLs));
+
+    setAddressField(BrowserLoginPolicy.withBundleUrl(stripped, bundleUrl,
+        BrowserLoginPolicy.openedToken(stripped)));
+    /* The engine saves its jar at the end of the crawl, and with no -%K it saves it beside the
+       mirror, in shared storage. This names a file in private storage instead, and nothing in
+       the app ever writes it. */
+    setMap(R.id.editCookiesFile, cookies.getAbsolutePath());
+    setMap(R.id.checkAcceptCookies, "1");
+    setMap(R.id.editNumberOfConnections,
+        BrowserLoginPolicy.sockets(getMap(R.id.editNumberOfConnections)));
+    setMap(R.id.editRules, BrowserLoginPolicy.rules(getMap(R.id.editRules)));
+    final int droppedCookies = data.getIntExtra(BrowserLoginActivity.EXTRA_DROPPED_COUNT, 0);
+    final String saved = getString(R.string.browser_login_saved,
+        data.getIntExtra(BrowserLoginActivity.EXTRA_COOKIE_COUNT, 0),
+        data.getIntExtra(BrowserLoginActivity.EXTRA_HOST_COUNT, 0),
+        BrowserLoginPolicy.MAX_SOCKETS);
+    // The engine drops a cookie its jar refuses, so saying only how many it kept is a lie.
+    final String message = droppedCookies == 0 ? saved
+        : saved + "\n\n" + getString(R.string.browser_login_dropped, droppedCookies);
+    new AlertDialog.Builder(this).setMessage(message)
+        .setPositiveButton(android.R.string.ok, null).show();
+  }
+
+  /**
+   * Put ADDRESSES in the address field, the map and the widget both. setMap alone leaves the old
+   * text on screen, and the next savePaneFields copies it back over the map, which made the
+   * whole feature invisible. The widget is only inflated on its own pane.
+   */
+  private void setAddressField(final String addresses) {
+    setMap(R.id.fieldWebsiteURLs, addresses);
+    if (pane_id == LAYOUT_PROJECT_SETUP) {
+      setFieldText(R.id.fieldWebsiteURLs, addresses);
+    }
+  }
+
+
+
+  /** Restore a previously saved map context. **/
+  private void loadParcelable(final Parcelable data) {
+    // Load modified map
+    mapper.unserialize(data);
+    Log.d(getClass().getSimpleName(), "received map size: " + mapper.size());
+
+    // Load possibly modified field(s)
+    loadPaneFields();
+  }
+
+  @Override
+  protected void onActivityResult(final int requestCode, final int resultCode,
+      final Intent data) {
+    Log.d(getClass().getSimpleName(), "onActivityResult");
+    super.onActivityResult(requestCode, resultCode, data);
+    switch (requestCode) {
+    case ACTIVITY_OPTIONS:
+      if (resultCode == Activity.RESULT_OK) {
+        // Load modified map
+        loadParcelable(data.getParcelableExtra(MAP_NAME));
+      }
+      break;
+    case ACTIVITY_FILE_CHOOSER:
+      if (resultCode == Activity.RESULT_OK) {
+        // Load modified map
+        final String path = data.getStringExtra("com.httrack.android.rootFile");
+        setBasePath(path);
+      }
+      break;
+    case ACTIVITY_IMPORT_TREE:
+      if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+        importMirrorsFrom(data.getData());
+      }
+      break;
+    case ACTIVITY_EXPORT_TREE:
+      if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+        exportMirrorToSaf(data.getData());
+      }
+      break;
+    case ACTIVITY_BROWSER_LOGIN:
+      if (resultCode == Activity.RESULT_OK && data != null) {
+        applyBrowserLogin(data);
+      }
+      break;
+    case ACTIVITY_PROJECT_NAME_CHOOSER:
+      if (resultCode == Activity.RESULT_OK) {
+        final String projectName = data
+            .getStringExtra("com.httrack.android.projectName");
+        final EditText name = EditText.class.cast(this
+            .findViewById(R.id.fieldProjectName));
+        name.setText(projectName);
+        name.setSelection(projectName.length());
+        name.requestFocus();
+      }
+      break;
+    case ACTIVITY_CLEANUP:
+      if (resultCode == Activity.RESULT_OK) {
+        final boolean rootWasDeleted = data.getBooleanExtra(
+            "com.httrack.android.rootPathWasDeleted", false);
+        // Exit because otherwise we can't recreate the directory (!)
+        if (rootWasDeleted
+            && android.os.Build.VERSION.SDK_INT >= VERSION_CODES.KITKAT) {
+          // Exit here, not from onDestroy(): its serialize() would mkdirs the tree just
+          // deleted. Restarting the activity is not enough either, a FUSE issue is suspected.
+          Log.w("httrack",
+              "exiting because root path was deleted (Android >= Kitkat issue)");
+          finish();
+          System.exit(0);
+        }
+      }
+      break;
+    }
+  }
+
+  /**
+   * "Show Logs"
+   */
+  public void onShowLogs(final View view) {
+    final File log = getTargetLogFile();
+    if (log == null || !log.exists()) {
+      return;
+    }
+    try {
+      showLogTail(log, LogTail.readNewest(log));
+    } catch (final IOException e) {
+      showNotification(e.getLocalizedMessage());
+    }
+  }
+
+  /** Show one window of the log, with a button for the window before it. */
+  private void showLogTail(final File log, final LogTail.Window window) {
+    final TextView text = new TextView(this);
+    text.setText(window.text());
+    final ScrollView scroll = new ScrollView(this);
+    scroll.addView(text);
+    final AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        .setTitle(R.string.show_logs).setView(scroll)
+        .setPositiveButton(android.R.string.ok, null);
+    if (window.hasEarlier()) {
+      builder.setNeutralButton(R.string.show_logs_earlier,
+          (dialog, which) -> showEarlierLogTail(log, window.start()));
+    }
+    builder.show();
+    // A tail is worth reading from its end.
+    scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+  }
+
+  /** Show the window that ends where the one on screen begins. */
+  private void showEarlierLogTail(final File log, final long end) {
+    try {
+      showLogTail(log, LogTail.read(log, end));
+    } catch (final IOException e) {
+      showNotification(e.getLocalizedMessage());
+    }
+  }
+
+    /** Browser a specific web page. **/
+  private void browse(final Uri uri) {
+    try {
+      final Intent intent = new Intent();
+      intent.setAction(android.content.Intent.ACTION_VIEW);
+      intent.setData(uri);
+      startActivity(intent);
+    } catch (final Exception e) {
+      showNotification(e.getLocalizedMessage());
+    }
+  }
+
+  /** Browse a crawled mirror in the browser proper: a whole site wants tabs and bookmarks. */
+  private void browse(final File index) {
+    Loopback.open(this, getProjectRootFile(), index, null, false);
+  }
+
+  /**
+   * "Browse Website"
+   */
+  public void onBrowse(final View view) {
+    browse(getTargetIndexFile());
+  }
+
+  /**
+   * "Browse All Websites"
+   */
+  public void onBrowseAll(final View view) {
+    if (browseAllInProgress) {
+      return;
+    }
+    // Regenerating the aggregate index walks every project's cache; keep it off the click handler.
+    final File index = getProjectRootIndexFile();
+    browseAllInProgress = true;
+    showNotification(getString(R.string.browse_all_building));
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          buildTopIndex();
+        } finally {
+          browseAllInProgress = false;
+        }
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+          @Override
+          public void run() {
+            if (!isFinishing() && !isDestroyed()) {
+              browse(index);
+            }
+          }
+        });
+      }
+    }, "browse-all-index").start();
+  }
+
+  /*
+   * Restart activity. (exit current app)
+   */
+  protected void restartActivity() {
+    if (HTTrackLib.hasFaulted()) {
+      // Restarting the activity keeps the process, which is what the fault poisoned.
+      closeAfterNativeFault();
+      return;
+    }
+    final Intent intent = getIntent();
+    finish();
+    startActivity(intent);
+  }
+
+  /**
+   * Close the app after a recovered native fault, so the next launch gets a working engine.
+   * finish() is asynchronous, so onDestroy() ends the process once it has saved the profile.
+   */
+  private void closeAfterNativeFault() {
+    Log.w(getClass().getSimpleName(), "closing: the native engine faulted");
+    exitWhenDestroyed = true;
+    finish();
+  }
+
+  // Set when the process itself has to go, not just the activity.
+  private boolean exitWhenDestroyed;
+
+  /**
+   * "New project"
+   */
+  public void onNewProject(final View view) {
+    restartActivity();
+  }
+
+  /**
+   * "Exit"
+   */
+  public void onExit(final View view) {
+    finish();
+  }
+  
+  /**
+   * Fill intent with common settings (project path, etc.).
+   * 
+   * @param intent
+   *          The intent object
+   */
+  protected void fillExtra(final Intent intent) {
+    intent.putExtra("com.httrack.android.rootFile", getProjectRootFile());
+    intent.putExtra("com.httrack.android.resourceFile", getResourceFile());
+  }
+
+  /**
+   * Does a crawl own a mirror right now? The pending term matters as much as the running
+   * one, because a connectivity stop empties the session and re-arms the job, so the copy comes
+   * back and rebuilds whatever was deleted meanwhile. hasLiveRunner already covers the session
+   * slot and the window before a crawl reaches it.
+   */
+  private boolean isCrawlLive() {
+    return hasLiveRunner() || MirrorJobService.isPending(this);
+  }
+
+  /**
+   * "Cleanup"
+   */
+  public void onCleanup(final View view) {
+    final String[] names = getProjectNames();
+    // Also guarded here, not only by the button's enabled state, which performClick ignores.
+    if (CleanupTitlePolicy.refusesDelete(isCrawlLive(), names != null && names.length != 0)) {
+      if (isCrawlLive()) {
+        Toast.makeText(this, R.string.cleanup_while_copying, Toast.LENGTH_LONG).show();
+      }
+      return;
+    }
+    if (names != null && names.length != 0) {
+      final Intent intent = new Intent(this, CleanupActivity.class);
+      fillExtra(intent);
+      intent.putExtra("com.httrack.android.projectNames", names);
+      intent.putExtra("com.httrack.android.action",
+          CleanupActivity.ACTION_CLEANUP);
+      startActivityForResult(intent, ACTIVITY_CLEANUP);
+    }
+  }
+
+  @Override
+  public void onConfigurationChanged(final Configuration newConfig) {
+    Log.d(getClass().getSimpleName(), "onConfigurationChanged");
+    super.onConfigurationChanged(newConfig);
+  }
+
+  @Override
+  public boolean onOptionsItemSelected(final MenuItem item) {
+    // Handle item selection
+    switch (item.getItemId()) {
+    case R.id.action_about:
+      final String about = getString(R.string.about_credits);
+      final String about0 = getString(R.string.app_name) + " " + versionName
+          + " (" + versionCode + ")";
+      final String aboutLegal = getTextResource(R.raw.legal);
+      new AlertDialog.Builder(this).setTitle(R.string.action_about)
+          .setMessage(about0 + "\n" + about + "\n\n" + aboutLegal)
+          .setPositiveButton(android.R.string.ok, null).show();
+      break;
+    case R.id.action_license:
+      Loopback.open(this, getResourceFile(), new File(new File(getResourceFile(), "license"),
+          "gpl-3.0-standalone.html"), null, true);
+      break;
+    case R.id.action_help:
+      Help.show(this, getResourceFile(), Help.pageForPane(pane_id));
+      break;
+    case R.id.action_import_mirrors:
+      startLegacyMirrorImport();
+      break;
+    default:
+      return super.onOptionsItemSelected(item);
+    }
+    return true;
+  }
+
+  /** Get current focus identifier. **/
+  protected int[] getCurrentFocusId() {
+    final View view = getCurrentFocus();
+    if (view != null) {
+      final int id = view.getId();
+      if (view instanceof EditText) {
+        final EditText edit = EditText.class.cast(view);
+        final int start = edit.getSelectionStart();
+        final int end = edit.getSelectionEnd();
+        return new int[] { id, start, end };
+      }
+      return new int[] { id };
+    } else {
+      return new int[] {};
+    }
+  }
+
+  /** Set current focus identifier. **/
+  private void setCurrentFocusId(final int ids[]) {
+    if (ids != null && ids.length != 0) {
+      final int id = ids[0];
+      final View view = findViewById(id);
+      if (view != null) {
+        view.requestFocus();
+        if (view instanceof EditText) {
+          final EditText edit = EditText.class.cast(view);
+          if (ids.length >= 3) {
+            final int start = ids[1];
+            final int end = ids[2];
+            edit.setSelection(start, end);
+          }
+        }
+      }
+    }
+  }
+
+  /** Save instance state. **/
+  protected void saveInstanceState(final Bundle outState) {
+    // Save current state. There is no guarantee than the application is going
+    // to be killed/restored, however.
+
+    // Save current pane
+    savePaneFields();
+
+    // Save settings to bundle
+
+    // Version ID
+    outState.putInt(VERSION_CODE_NAME, versionCode);
+
+    // Map keys
+    outState.putParcelable(MAP_NAME, mapper.serialize());
+
+    // Which project's profile the map holds, so the reload guard survives recreation.
+    outState.putString("com.httrack.android.loadedProjectName", loadedProjectName);
+
+    // Current pane
+    outState.putInt(PANE_NAME, pane_id);
+
+    // Current focus id
+    outState.putIntArray("com.httrack.android.focus_id", getCurrentFocusId());
+  }
+
+  @Override
+  protected void onSaveInstanceState(final Bundle outState) {
+    Log.d(getClass().getSimpleName(), "onSaveInstanceState");
+    super.onSaveInstanceState(outState);
+    saveInstanceState(outState);
+  }
+
+  /**
+   * Display a notification ("toast")
+   * 
+   * @param message
+   *          The message to be shown.
+   * @param longDuration
+   *          Should the notification duration be long ?
+   */
+  protected void showNotification(final String message,
+      final boolean longDuration) {
+    final Context context = getApplicationContext();
+    final int duration = longDuration ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
+    final Toast toast = Toast.makeText(context, message, duration);
+    toast.show();
+  }
+
+  /**
+   * Display a short notification ("toast")
+   * 
+   * @param message
+   *          The message to be shown.
+   */
+  protected void showNotification(final String message) {
+    showNotification(message, false);
+  }
+
+  /** Get a pointer to the current activity. **/
+  protected Intent getCurrentIntentReference() {
+    Intent intent = new Intent(getApplicationContext(), this.getClass());
+    intent.setAction("android.intent.action.MAIN");
+    intent.addCategory("android.intent.category.LAUNCHER");
+    return intent;
+  }
+
+  /**
+   * Register the channel the notifications below are posted to. Mandatory from API 26 on,
+   * where a channel-less notification is dropped with nothing but a log line; a no-op before.
+   * Idempotent, and called at post time rather than at startup: creating a channel is what
+   * makes the system prompt an app targeting 32 or lower, and launch is too early to ask.
+   */
+  protected void createNotificationChannel() {
+    createNotificationChannel(this);
+  }
+
+  /**
+   * Register that same channel from a context with no window.
+   *
+   * @param context
+   *          any context of this app
+   */
+  static void createNotificationChannel(final Context context) {
+    final NotificationChannelCompat channel = new NotificationChannelCompat.Builder(
+        NOTIFICATION_CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_DEFAULT)
+        .setName(context.getString(R.string.app_name)).build();
+    NotificationManagerCompat.from(context).createNotificationChannel(channel);
+  }
+
+  /**
+   * Tell the user a crawl has ended when no window took its verdict, which is what the finished
+   * pane would otherwise have shown.
+   *
+   * @param context
+   *          any context of this app
+   * @param projectName
+   *          the mirror's name
+   * @param message
+   *          the verdict, as the HTML the finished pane renders
+   */
+  static void sendFinishedNotification(final Context context, final String projectName,
+      final String message) {
+    postOnMirrorChannel(context, context.getString(R.string.mirror_finished) + ": " + projectName,
+        Html.fromHtml(message != null ? message : ""));
+  }
+
+  /**
+   * Tell the user a crawl was stopped for a reason that will not bring it back, which only
+   * {@link JobStopPolicy#tellsTheUser} answers for.
+   *
+   * @param context
+   *          any context of this app
+   * @param projectName
+   *          the mirror's name
+   */
+  static void sendStoppedNotification(final Context context, final String projectName) {
+    postOnMirrorChannel(context,
+        context.getString(R.string.mirror_xxx_stopped).replace("%s", projectName),
+        context.getString(R.string.mirror_stopped_will_not_resume));
+  }
+
+  /* One notification on the buzzing channel, with a launcher intent a dead crawl can survive. */
+  private static void postOnMirrorChannel(final Context context, final CharSequence title,
+      final CharSequence text) {
+    createNotificationChannel(context);
+    final long when = System.currentTimeMillis();
+    final int id = (int) when;
+    // No extras: a tap restoring them would overwrite the option map the user has since edited.
+    final Intent intent = new Intent(context, HTTrackActivity.class);
+    intent.setAction(Intent.ACTION_MAIN);
+    intent.addCategory(Intent.CATEGORY_LAUNCHER);
+    final PendingIntent pintent = PendingIntent.getActivity(context, id, intent,
+        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    final Notification notification = new NotificationCompat.Builder(context,
+        NOTIFICATION_CHANNEL_ID).setContentTitle(title).setContentText(text).setTicker(title)
+        .setSmallIcon(R.drawable.ic_stat_httrack).setWhen(when).setContentIntent(pintent)
+        .setAutoCancel(true).build();
+    try {
+      NotificationManagerCompat.from(context).notify(id, notification);
+    } catch (final SecurityException refused) {
+      // The user never granted POST_NOTIFICATIONS, so this crawl's end goes unreported.
+      Log.w("HTTrackActivity", "could not post the notification", refused);
+    }
+  }
+
+  /* The system removes it with the job, so one still here with nothing running is a dead
+   * process's last frame. */
+  private void cancelStaleProgressNotification() {
+    if (NotificationRate.cancelsStale(MirrorSession.get().live() != null,
+        MirrorJobService.isExecuting())) {
+      NotificationManagerCompat.from(this).cancel(PROGRESS_NOTIFICATION_ID);
+    }
+  }
+
+  /**
+   * Register the channel a running mirror's progress is posted to. Idempotent, like the one
+   * above, and separate from it because a progress update must never make a sound.
+   *
+   * @param context
+   *          any context of this app
+   */
+  static void createProgressChannel(final Context context) {
+    final NotificationChannelCompat channel = new NotificationChannelCompat.Builder(
+        PROGRESS_CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_LOW)
+        .setName(context.getString(R.string.mirror_progress_channel))
+        .setDescription(context.getString(R.string.mirror_progress_channel_description)).build();
+    NotificationManagerCompat.from(context).createNotificationChannel(channel);
+  }
+
+  /** Send a notification. **/
+  protected void sendAbortNotification() {
+    final String title = getString(R.string.mirror_xxx_stopped).replace("%s",
+        mapper.getProjectName());
+    final String text = getString(R.string.click_on_notification_to_restart);
+
+    // Continue an interrupted mirror
+    setMap(R.id.radioAction, "0");
+
+    // Build notification
+    final Intent intent = new Intent(this, HTTrackActivity.class);
+    final Bundle extras = new Bundle();
+    saveInstanceState(extras);
+
+    intent.putExtras(extras);
+    sendSystemNotification(intent, title, text);
+  }
+
+  /** Send a notification with a specific Intent. **/
+  protected void sendSystemNotification(final Intent intent,
+      final CharSequence title, final CharSequence text) {
+
+    createNotificationChannel();
+
+    // Create notification
+    final long when = System.currentTimeMillis();
+    // One request code per notification, so each keeps its own extras. Request code 0 shared a
+    // single PendingIntent across notifications, and filterEquals() ignores extras, so tapping a
+    // later notification restored an earlier one's project. UPDATE_CURRENT refreshes on a
+    // same-millisecond collision; IMMUTABLE is mandatory from API 31 on, and right, since we
+    // read the extras back ourselves.
+    final int id = (int) when;
+    final PendingIntent pintent = PendingIntent.getActivity(this, id, intent,
+        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    final Notification notification = new NotificationCompat.Builder(this,
+        NOTIFICATION_CHANNEL_ID).setContentTitle(title).setContentText(text)
+        // The status bar keeps only alpha: ic_launcher arrives there as a white rectangle.
+        .setTicker(title).setSmallIcon(R.drawable.ic_stat_httrack).setWhen(when)
+        .setContentIntent(pintent).setAutoCancel(true).build();
+
+    // Send
+    final NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+    manager.notify(id, notification);
+  }
+
+  /** Send a notification with a blank Intent. **/
+  protected void sendSystemNotification(final CharSequence title,
+      final CharSequence text) {
+    sendSystemNotification(new Intent(), title, text);
+  }
+
+  /** Restore a saved instance state; false when the bundle was refused. **/
+  protected boolean restoreInstanceState(final Bundle savedInstanceState) {
+    // Check version ID
+    final int version = savedInstanceState.getInt(VERSION_CODE_NAME);
+    if (version != versionCode) {
+      Log.d(getClass().getSimpleName(), "refused bundle version " + version);
+      return false;
+    }
+
+    // Switch pane id
+    final int id = savedInstanceState.getInt(PANE_NAME);
+
+    // Current focus
+    final int[] focus_ids = savedInstanceState
+        .getIntArray("com.httrack.android.focus_id");
+
+    // Load map
+    final Parcelable data = savedInstanceState.getParcelable(MAP_NAME);
+
+    // Load map
+    if (data != null) {
+      // Load map settings
+      loadParcelable(data);
+
+      // Restore the reload-guard sentinel alongside the map it tracks; else a post-restore
+      // Back/Next would treat the live map as stale and wipe the user's edits.
+      loadedProjectName = savedInstanceState
+          .getString("com.httrack.android.loadedProjectName");
+
+      // The progress pane means a live crawl; after process death none exists, so land on the
+      // setup pane instead, where isInterruptedProfile() defaults the action to Continue.
+      final int paneId = (id == LAYOUT_MIRROR_PROGRESS && !hasLiveRunner())
+          ? LAYOUT_PROJECT_SETUP : id;
+
+      // Switch pane id (0 by default)
+      setPane(paneId);
+
+      // Set focus
+      setCurrentFocusId(focus_ids);
+
+      // Special case: we're on the project name pane - load it if no settings
+      // are defined.
+      if (id == LAYOUT_PROJECT_NAME) {
+        dirtyNamePane = true;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  protected void onRestoreInstanceState(final Bundle savedInstanceState) {
+    Log.d(getClass().getSimpleName(), "onRestoreInstanceState");
+    super.onRestoreInstanceState(savedInstanceState);
+
+    // Security
+    if (runner != null) {
+      showNotification(
+          "restore called while running ignored! please report this warning to the developers",
+          true);
+      return;
+    }
+
+    restoreInstanceState(savedInstanceState);
+  }
+
+  @Override
+  protected void onPause() {
+    Log.d(getClass().getSimpleName(), "onPause");
+    super.onPause();
+  }
+
+  @Override
+  protected void onResume() {
+    Log.d(getClass().getSimpleName(), "onResume");
+    super.onResume();
+    // Returning from the all-files-access settings screen can change what we can write.
+    // Never while a crawl runs, since the engine already holds the destination.
+    if (runner == null && !hasLiveRunner()) {
+      computeStorageTarget();
+    }
+    // A grant made on the settings screen flips the button/warning off (no-op off this panel).
+    refreshStorageAccessHints();
+    // Ask again once a grant may have surfaced the folder; not mid-crawl, and not on a plain
+    // resume, which onCreate has already covered.
+    final boolean access = hasAllFilesAccess();
+    if (runner == null && !hasLiveRunner()
+        && StoragePaths.accessJustAppeared(hadStorageAccess, access)) {
+      offerLegacyMirrorImportOnce();
+    }
+    hadStorageAccess = access;
+    if (NativeFaultPolicy.reportOnResume(HTTrackLib.hasFaulted(), pane_id, LAYOUT_FINISHED)) {
+      displayFinishedPanel("<b>Error</b>: "
+          + TextUtils.htmlEncode(getString(R.string.engine_faulted)), 0, null);
+    }
+  }
+
+  @Override
+  protected void onStart() {
+    Log.d(getClass().getSimpleName(), "onStart");
+    super.onStart();
+    started = true;
+    // Read here as well as on a Runner attach, since a job-owned crawl attaches to no Runner.
+    cacheProgressStrings();
+    MirrorSession.get().listen(sessionListener);
+    attachToLiveCrawl();
+  }
+
+  @Override
+  protected void onStop() {
+    Log.d(getClass().getSimpleName(), "onStop");
+    super.onStop();
+    started = false;
+    MirrorSession.get().unlisten(sessionListener);
+  }
+
+  @Override
+  public void onDestroy() {
+    Log.d(getClass().getSimpleName(), "onDestroy");
+    // We are being destroyed... save profile ?
+    savePaneFields();
+    final String name = mapper.getProjectName();
+    if (mapper.isDirty() && OptionsMapper.isStringNonEmpty(name)
+        && OptionsMapper.isStringNonEmpty(mapper.getProjectUrl())) {
+      try {
+        serialize();
+        Log.d(getClass().getSimpleName(),
+            "saved profile for " + mapper.getProjectName());
+      } catch (final IOException e) {
+        Log.d(getClass().getSimpleName(), "could not save profile", e);
+        final String title = getString(R.string.could_not_save_profile_xxx)
+            .replace("%s", name);
+        sendSystemNotification(title, e.getMessage());
+      }
+    }
+    // Unconditional: the runner fragment is still live here, so a refresh would re-hold it.
+    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    super.onDestroy();
+    // A relaunch can be handed this very process, latch and all.
+    if (NativeFaultPolicy.exitOnDestroy(isFinishing(), exitWhenDestroyed,
+        HTTrackLib.hasFaulted())) {
+      Log.w(getClass().getSimpleName(), "ending the process");
+      System.exit(0);
+    }
+  }
+
+  /** Leave the foreground, without killing us. **/
+  private void goToHome() {
+    // Throws only when system_server has died, which takes this process with it anyway.
+    final boolean moved = moveTaskToBack(true);
+    final boolean home = BackgroundPolicy.askTheLauncher(moved) && startHomeIntent();
+    if (BackgroundPolicy.stillOnScreen(moved, home)) {
+      Log.w(getClass().getSimpleName(), "back pressed, but the task would not move");
+    }
+  }
+
+  /** Ask the launcher for the home screen, and return false when it refuses with an exception. */
+  private boolean startHomeIntent() {
+    try {
+      final Intent intent = new Intent(Intent.ACTION_MAIN);
+      intent.addCategory(Intent.CATEGORY_HOME);
+      startActivity(intent);
+      return true;
+    } catch (final Exception e) {
+      Log.w(getClass().getSimpleName(), "no home screen to go to", e);
+      return false;
+    }
+  }
+
+  /*
+   * Enabled only on the progress pane, where finishing would take the retained fragment, and
+   * the crawl with it, down. Everywhere else it stays disabled so back does its usual thing.
+   */
+  private final OnBackPressedCallback stayAliveWhileMirroring = new OnBackPressedCallback(false) {
+    @Override
+    public void handleOnBackPressed() {
+      goToHome();
+    }
+  };
+}

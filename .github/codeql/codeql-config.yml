@@ -1,0 +1,10 @@
+# Scope the CodeQL analysis to httrack-android's OWN code: the Java app and the
+# JNI glue. The vendored httrack engine, coucal and libiconv are scanned by their
+# own repos, so scanning them here only duplicates findings and build time.
+name: httrack-android CodeQL config
+
+# `paths` reaches java-kotlin only, because that leg runs build-mode: none. GitHub
+# honours a path filter for a compiled language only when it does not build the
+# code, so the build steps in codeql.yml are what scope c-cpp.
+paths:
+  - app/src/main/java

@@ -1,0 +1,10 @@
+<resources>
+
+    <!-- Night variant: Material dark base with RaufixTeam WebTools indigo/teal accents. -->
+    <style name="AppBaseTheme" parent="@android:style/Theme.Material">
+        <item name="android:colorPrimary">@color/brand_primary</item>
+        <item name="android:colorPrimaryDark">@color/brand_primary_dark</item>
+        <item name="android:colorAccent">@color/brand_accent</item>
+    </style>
+
+</resources>

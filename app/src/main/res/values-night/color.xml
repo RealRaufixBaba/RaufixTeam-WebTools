@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#334155</color>
+    <color name="blue">#60A5FA</color>
+    <color name="transparent">#80000000</color>
+    <color name="brand_primary">#1E88E5</color>
+    <color name="brand_primary_dark">#0F172A</color>
+    <color name="brand_accent">#26A69A</color>
+</resources>
