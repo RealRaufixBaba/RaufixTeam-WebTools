@@ -2065,11 +2065,15 @@ public class HTTrackActivity extends FragmentActivity {
       return false;
     }
     return MirrorJobService.schedule(this, mapper.getProjectName(), getTargetFile(),
-        getProjectRootFile(), getResourceFile(), buildCommandline(), isAllowLanArchiving());
+        getProjectRootFile(), getResourceFile(), buildCommandline());
+  }
+
+  static boolean isAllowLanArchiving(final Context context) {
+    return context.getSharedPreferences(PREFS_NAME, 0).getBoolean(ALLOW_LAN_NAME, false);
   }
 
   protected boolean isAllowLanArchiving() {
-    return getSharedPreferences(PREFS_NAME, 0).getBoolean(ALLOW_LAN_NAME, false);
+    return isAllowLanArchiving(this);
   }
 
   private void wireAllowLanArchiving() {

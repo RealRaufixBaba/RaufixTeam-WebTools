@@ -116,6 +116,21 @@ jobs:
           restore-keys: gradle-${{ runner.os }}-
       - name: Gradle assemble + test + lint
         run: ./gradlew --no-daemon assembleDebug assembleRelease testDebugUnitTest lint
+      - name: Report unit test failures (if any)
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          for p in sorted(Path("app/build/test-results").rglob("*.xml")):
+              root = ET.parse(p).getroot()
+              for tc in root.findall("testcase"):
+                  for tag in ("failure", "error"):
+                      el = tc.find(tag)
+                      if el is not None:
+                          msg = (el.attrib.get("message") or "").replace("\n", " ")
+                          print(f"::error::{tc.attrib.get('classname')}.{tc.attrib.get('name')}: {msg}")
+          PY
       - name: Sign installable universal release APK
         run: |
           SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
@@ -161,6 +176,29 @@ jobs:
           name: lint-report
           path: app/build/reports/lint-results-*.*
           if-no-files-found: warn
+      - name: Publish GitHub Release v1.0.0
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/arena/59703b72-raufixteam-webtools' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.0"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          SIGNED_APK="app/build/outputs/apk/release-signed/RaufixTeam-WebTools-v1.0.0-universal.apk"
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          SHA_FILE="app/build/outputs/apk/release-signed/SHA256SUMS.txt"
+          (cd app/build/outputs/apk/release-signed && sha256sum RaufixTeam-WebTools-v1.0.0-universal.apk) > "$SHA_FILE"
+          (cd app/build/outputs/apk/debug && sha256sum app-debug.apk) >> "$SHA_FILE"
+          NOTES="RaufixTeam WebTools (${TAG}) - Universal Android APK (armeabi-v7a, arm64-v8a, x86_64, API 22-36, 16 KB aligned, GPLv3+)."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$SIGNED_APK" "$DEBUG_APK" "$SHA_FILE" --clobber
+          else
+            gh release create "$TAG" "$SIGNED_APK" "$DEBUG_APK" "$SHA_FILE" \
+              --target "$GITHUB_SHA" \
+              --title "RaufixTeam WebTools $TAG" \
+              --notes "$NOTES"
+          fi
 
   play-tools:
     name: play tooling

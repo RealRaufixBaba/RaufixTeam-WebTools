@@ -101,12 +101,6 @@ public final class MirrorJobService extends JobService {
 
   static boolean schedule(final Context context, final String projectName, final File target,
       final File projectRoot, final File resources, final List<String> options) {
-    return schedule(context, projectName, target, projectRoot, resources, options, false);
-  }
-
-  static boolean schedule(final Context context, final String projectName, final File target,
-      final File projectRoot, final File resources, final List<String> options,
-      final boolean allowLan) {
     if (target == null || projectRoot == null || resources == null) {
       return false;
     }
@@ -118,7 +112,7 @@ public final class MirrorJobService extends JobService {
     extras.putString(EXTRA_PROJECT_ROOT, projectRoot.getAbsolutePath());
     extras.putString(EXTRA_RESOURCES, resources.getAbsolutePath());
     extras.putStringArray(EXTRA_OPTIONS, options.toArray(new String[] {}));
-    extras.putInt(EXTRA_ALLOW_LAN, allowLan ? 1 : 0);
+    extras.putInt(EXTRA_ALLOW_LAN, HTTrackActivity.isAllowLanArchiving(context) ? 1 : 0);
 
     final JobInfo job = new JobInfo.Builder(JOB_ID,
         new ComponentName(context, MirrorJobService.class)).setUserInitiated(true)
