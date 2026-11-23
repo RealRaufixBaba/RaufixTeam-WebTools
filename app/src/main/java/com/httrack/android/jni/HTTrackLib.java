@@ -174,6 +174,12 @@ public class HTTrackLib {
   private static native boolean nativeHasFaulted();
 
   /**
+   * Controls whether the native check_link SSRF filter permits local/LAN targets.
+   * Cloud metadata endpoints remain unconditionally blocked.
+   */
+  public static native void setAllowLanArchiving(boolean allow);
+
+  /**
    * Build the top-level index.
    *
    * @param path          The target path;

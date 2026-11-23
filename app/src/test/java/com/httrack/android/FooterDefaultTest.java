@@ -5,13 +5,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.Test;
 
 /**
- * The default -%F template must use the engine's named fields: one %s anywhere
- * selects the legacy positional path, which renders {url} verbatim.
+ * RaufixTeam WebTools defaults to an empty HTML footer and must pass -%F "" to the
+ * engine so HTS_DEFAULT_FOOTER is suppressed unless the user configures one.
  */
 public class FooterDefaultTest {
   private static final Pattern MAPPER_DEFAULT = Pattern.compile(
@@ -26,45 +27,41 @@ public class FooterDefaultTest {
     return m.group(1);
   }
 
-  /** Android string-resource escaping, enough for this one string. */
-  private static String unescape(final String value) {
-    return value.replace("&lt;", "<").replace("&gt;", ">").replace("\\'", "'")
-        .replace("&amp;", "&");
-  }
-
   private static String mapperDefault() throws IOException {
     return group(MAPPER_DEFAULT, TestSources.javaSource("OptionsMapper"));
   }
 
   @Test
-  public void defaultUsesNamedFields() throws IOException {
-    final String footer = mapperDefault();
-    assertFalse(footer, footer.contains("%s"));
-    assertTrue(footer, footer.contains("{url}"));
-    assertTrue(footer, footer.contains("{date}"));
+  public void defaultFooterIsEmpty() throws IOException {
+    assertEquals("", mapperDefault());
   }
 
-  /** Both strings agreeing on the wrong text would satisfy the field check. */
   @Test
-  public void defaultIsAnHttrackComment() throws IOException {
-    final String footer = mapperDefault();
-    assertTrue(footer, footer.startsWith("<!--"));
-    assertTrue(footer, footer.endsWith("-->"));
-    assertTrue(footer, footer.contains("HTTrack Website Copier"));
+  public void emptyFooterEmitsExplicitSuppressionFlag() {
+    final OptionsMapper mapper = new OptionsMapper();
+    mapper.setMap(R.id.fieldWebsiteURLs, "https://example.com/");
+    final List<String> cmd = mapper.buildCommandline();
+    final int idx = cmd.indexOf("-%F");
+    assertTrue("expected -%F flag in " + cmd, idx >= 0);
+    assertEquals("", cmd.get(idx + 1));
   }
 
-  /** {date} already dates the footer, so a baked year only goes stale. */
   @Test
-  public void defaultCarriesNoYear() throws IOException {
-    final String footer = mapperDefault();
-    assertFalse(footer, Pattern.compile("\\d{4}").matcher(footer).find());
+  public void customFooterIsPreserved() {
+    final OptionsMapper mapper = new OptionsMapper();
+    mapper.setMap(R.id.fieldWebsiteURLs, "https://example.com/");
+    mapper.setMap(R.id.editHtmlFooter, "<!-- archived -->");
+    final List<String> cmd = mapper.buildCommandline();
+    final int idx = cmd.indexOf("-%F");
+    assertTrue("expected -%F flag in " + cmd, idx >= 0);
+    assertEquals("<!-- archived -->", cmd.get(idx + 1));
   }
 
-  /** The hint shows the field's own default, so it must not teach %s either. */
   @Test
-  public void hintMatchesTheDefault() throws IOException {
-    final String hint = unescape(group(HINT,
-        TestSources.read(TestSources.resFile("values/strings.xml"))));
-    assertEquals(mapperDefault(), hint);
+  public void hintMatchesEmptyDefaultWithoutLegacyBranding() throws IOException {
+    final String hint = group(HINT,
+        TestSources.read(TestSources.resFile("values/strings.xml")));
+    assertFalse(hint, hint.contains("%s"));
+    assertFalse(hint, hint.contains("HTTrack"));
   }
 }

@@ -150,6 +150,8 @@ public class HTTrackActivity extends FragmentActivity {
   protected static final String PREVIOUS_BASE_NAME = "PreviousBasePath";
   // App-local on purpose: an engine option lands in winprofile.ini, which WinHTTrack reads.
   protected static final String KEEP_SCREEN_ON_NAME = "KeepScreenOnWhileMirroring";
+  // Explicit opt-in for archiving local/LAN addresses (cloud metadata remains blocked).
+  protected static final String ALLOW_LAN_NAME = "AllowLanArchiving";
 
   // <br /> Pattern
   protected static final Pattern brHtmlPattern = Pattern.compile(Pattern
@@ -196,6 +198,7 @@ public class HTTrackActivity extends FragmentActivity {
   protected static final int ACTIVITY_CLEANUP = 3;
   protected static final int ACTIVITY_IMPORT_TREE = 4;
   protected static final int ACTIVITY_BROWSER_LOGIN = 5;
+  protected static final int ACTIVITY_EXPORT_TREE = 6;
 
   // Constant on purpose: a per-process tag travels through saved state and through notification
   // extras, so a cold launch would adopt a dead process's tag.
@@ -506,57 +509,40 @@ public class HTTrackActivity extends FragmentActivity {
   private static final int REQUEST_WRITE_STORAGE = 4;
 
   /*
-   * Whether the app may write anywhere in shared storage: all-files access from Android 11 on,
-   * or the legacy WRITE_EXTERNAL_STORAGE permission below it.
+   * Legacy shared-storage write permission for API < 30. On Android 11+ (API 30+), the app uses
+   * scoped app-specific storage without MANAGE_EXTERNAL_STORAGE and exports via SAF.
    */
   private boolean hasAllFilesAccess() {
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-      return Environment.isExternalStorageManager();
+      return false;
     }
     return ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
             == PackageManager.PERMISSION_GRANTED;
   }
 
   /*
-   * Ask for the access that lets mirrors live in the public HTTrack/ folder, reachable by other
-   * apps. Android 11+ grants all-files access from a system settings screen; below it, the runtime
-   * WRITE permission. Offered once per install; a refusal simply keeps mirrors in private storage.
+   * On API < 30, request legacy WRITE_EXTERNAL_STORAGE if not yet granted. On API 30+, mirrors
+   * live in app-scoped storage and can be exported anytime via SAF without special permissions.
    */
   protected void ensureStorageAccess() {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+      return;
+    }
     if (hasAllFilesAccess()) {
       return;
     }
     if (getSharedPreferences(PREFS_NAME, 0).getBoolean(STORAGE_ASKED_NAME, false)) {
       return;
     }
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-      new AlertDialog.Builder(this)
-          .setMessage(R.string.storage_access_prompt)
-          .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-            getSharedPreferences(PREFS_NAME, 0).edit()
-                .putBoolean(STORAGE_ASKED_NAME, true).apply();
-            requestAllFilesAccess();
-          })
-          .setNegativeButton(R.string.import_mirrors_offer_later, null)
-          .show();
-    } else {
-      requestAllFilesAccess();
-    }
+    getSharedPreferences(PREFS_NAME, 0).edit()
+        .putBoolean(STORAGE_ASKED_NAME, true).apply();
+    requestAllFilesAccess();
   }
 
-  // Ungated, unlike the one-shot install prompt, so the base-path panel button can reuse it.
+  // Legacy WRITE_EXTERNAL_STORAGE prompt for API < 30; on API 30+, opens SAF export/folder picker.
   private void requestAllFilesAccess() {
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-      try {
-        startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-            Uri.parse("package:" + getPackageName())));
-      } catch (final Exception e) {
-        try {
-          startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-        } catch (final Exception e2) {
-          Log.d(getClass().getSimpleName(), "no all-files-access settings screen", e2);
-        }
-      }
+      showNotification(getString(R.string.storage_scoped_saf_hint));
     } else {
       ActivityCompat.requestPermissions(this,
               new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_WRITE_STORAGE);
@@ -564,7 +550,7 @@ public class HTTrackActivity extends FragmentActivity {
   }
 
   /*
-   * Base-path panel button: grant all-files access so mirrors move to the public HTTrack/ folder.
+   * Base-path panel button: request legacy storage permission on API < 30.
    */
   public void onClickEnableAllFilesAccess(final View view) {
     requestAllFilesAccess();
@@ -628,7 +614,10 @@ public class HTTrackActivity extends FragmentActivity {
         getProjectRootFile(), Environment.getExternalStorageDirectory()) != null;
     final View grant = findViewById(R.id.buttonEnableAllFiles);
     if (grant != null) {
-      grant.setVisibility(hasAllFilesAccess() ? View.GONE : View.VISIBLE);
+      final boolean showLegacyGrant =
+          android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R
+          && !hasAllFilesAccess();
+      grant.setVisibility(showLegacyGrant ? View.VISIBLE : View.GONE);
     }
     final View warning = findViewById(R.id.textStorageWarning);
     if (warning != null) {
@@ -1389,6 +1378,7 @@ public class HTTrackActivity extends FragmentActivity {
     private final Context appContext;
     private final CrawlRun crawl;
     private final List<Runnable> pendingParentActions = new ArrayList<Runnable>();
+    private volatile boolean allowLan;
     private HTTrackActivity parent;
 
     /**
@@ -1411,6 +1401,7 @@ public class HTTrackActivity extends FragmentActivity {
      */
     public synchronized void setParent(final HTTrackActivity parent) {
       this.parent = parent;
+      this.allowLan = parent.isAllowLanArchiving();
       parent.cacheProgressStrings();
       crawl.setMessages(HTTrackActivity.crawlMessages(parent));
 
@@ -1441,6 +1432,7 @@ public class HTTrackActivity extends FragmentActivity {
     @Override
     protected Void doInBackground(final Void... arg0) {
       try {
+        HTTrackLib.setAllowLanArchiving(allowLan);
         crawl.runMirror();
       } catch (final Throwable e) {
         // Last resort: CrawlRun absorbs its own failures, this only covers what comes after.
@@ -2073,7 +2065,26 @@ public class HTTrackActivity extends FragmentActivity {
       return false;
     }
     return MirrorJobService.schedule(this, mapper.getProjectName(), getTargetFile(),
-        getProjectRootFile(), getResourceFile(), buildCommandline());
+        getProjectRootFile(), getResourceFile(), buildCommandline(), isAllowLanArchiving());
+  }
+
+  protected boolean isAllowLanArchiving() {
+    return getSharedPreferences(PREFS_NAME, 0).getBoolean(ALLOW_LAN_NAME, false);
+  }
+
+  private void wireAllowLanArchiving() {
+    final CheckBox box = CheckBox.class.cast(findViewById(R.id.checkAllowLanArchiving));
+    if (box == null) {
+      return;
+    }
+    box.setChecked(isAllowLanArchiving());
+    box.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+      @Override
+      public void onCheckedChanged(final CompoundButton button, final boolean checked) {
+        getSharedPreferences(PREFS_NAME, 0).edit()
+            .putBoolean(ALLOW_LAN_NAME, checked).apply();
+      }
+    });
   }
 
   /**
@@ -2141,7 +2152,7 @@ public class HTTrackActivity extends FragmentActivity {
       final StringBuilder html = new StringBuilder(
           getString(R.string.welcome_message).replace("\n-", "\n•")
               .replace("\n", "<br />")
-              .replace("HTTrack Website Copier", "<b>HTTrack Website Copier</b>"));
+              .replace("RaufixTeam WebTools", "<b>RaufixTeam WebTools</b>"));
 
       // Nothing else on a cold launch points at a project a crawl left unfinished.
       final String unfinished = ResumePolicy.resumeNotice(
@@ -2256,6 +2267,7 @@ public class HTTrackActivity extends FragmentActivity {
       });
       break;
     case R.layout.activity_proj_setup:
+      wireAllowLanArchiving();
       // Existing cache ?
       final boolean hasProfile = hasCacheFile();
       View.class.cast(this.findViewById(R.id.radioAction)).setEnabled(
@@ -2315,6 +2327,11 @@ public class HTTrackActivity extends FragmentActivity {
       // Enable logs if present
       final boolean hasLog = hasTargetLogFile();
       View.class.cast(this.findViewById(R.id.buttonLogs)).setEnabled(hasLog);
+      final View exportBtn = this.findViewById(R.id.buttonExportSaf);
+      if (exportBtn != null) {
+        final File target = getTargetFile();
+        exportBtn.setEnabled(target != null && target.isDirectory());
+      }
       if (!hasLog) {
         final File log = getTargetLogFile();
         Log.d(getClass().getSimpleName(),
@@ -2582,8 +2599,31 @@ public class HTTrackActivity extends FragmentActivity {
       }
       return false;
     case LAYOUT_PROJECT_SETUP:
-      return OptionsMapper
-          .isStringNonEmpty(getFieldText(R.id.fieldWebsiteURLs));
+      final String rawUrls = getFieldText(R.id.fieldWebsiteURLs);
+      if (!OptionsMapper.isStringNonEmpty(rawUrls)) {
+        return false;
+      }
+      final boolean allowLan = isAllowLanArchiving();
+      for (final String token : rawUrls.trim().split("\\s+")) {
+        if (token.isEmpty()) {
+          continue;
+        }
+        final UrlSafetyPolicy.Verdict verdict = UrlSafetyPolicy.checkUrl(token, allowLan);
+        if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_UNSAFE_SCHEME) {
+          showNotification(getString(R.string.url_blocked_scheme), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_METADATA) {
+          showNotification(getString(R.string.url_blocked_metadata), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.BLOCKED_LOCAL_OR_PRIVATE) {
+          showNotification(getString(R.string.url_blocked_local), true);
+          return false;
+        } else if (verdict == UrlSafetyPolicy.Verdict.INVALID_URL) {
+          showNotification(getString(R.string.url_invalid), true);
+          return false;
+        }
+      }
+      return true;
     }
     return true;
   }
@@ -2698,7 +2738,76 @@ public class HTTrackActivity extends FragmentActivity {
 
   // Process-wide: a rotation recreates the activity, but the detached worker keeps copying.
   private static final AtomicBoolean importInProgress = new AtomicBoolean();
+  private static final AtomicBoolean exportInProgress = new AtomicBoolean();
   private volatile boolean browseAllInProgress;
+
+  /**
+   * Let the user pick any folder via Storage Access Framework to export the finished mirror.
+   */
+  public void onClickExportMirrorSaf(final View view) {
+    final File target = getTargetFile();
+    if (target == null || !target.isDirectory()) {
+      showNotification(getString(R.string.export_saf_no_target), true);
+      return;
+    }
+    final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+    try {
+      startActivityForResult(intent, ACTIVITY_EXPORT_TREE);
+    } catch (final Exception e) {
+      Log.w(getClass().getSimpleName(), "could not open SAF export picker", e);
+      showNotification(getString(R.string.import_mirrors_none), true);
+    }
+  }
+
+  private void exportMirrorToSaf(final Uri treeUri) {
+    final File target = getTargetFile();
+    if (target == null || !target.isDirectory()) {
+      showNotification(getString(R.string.export_saf_no_target), true);
+      return;
+    }
+    try {
+      getContentResolver().takePersistableUriPermission(treeUri,
+          Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    } catch (final SecurityException ignored) {
+      // Some providers grant transient write access without persistable flags; export still works.
+    }
+    if (!exportInProgress.compareAndSet(false, true)) {
+      showNotification(getString(R.string.export_saf_running));
+      return;
+    }
+    final Context appContext = getApplicationContext();
+    final String exportName = mapper.getProjectName();
+    try {
+      showNotification(getString(R.string.export_saf_running));
+      new Thread(new Runnable() {
+        @Override
+        public void run() {
+          String message;
+          try {
+            final SafMirrorExport.Result r =
+                SafMirrorExport.exportTree(appContext, treeUri, target, exportName);
+            if (r.isComplete()) {
+              message = appContext.getString(R.string.export_saf_done, r.copied);
+            } else {
+              message = appContext.getString(R.string.export_saf_partial, r.copied, r.failed);
+            }
+          } catch (final Throwable t) {
+            Log.w(getClass().getSimpleName(), "SAF export failed", t);
+            message = appContext.getString(R.string.export_saf_failed);
+          } finally {
+            exportInProgress.set(false);
+          }
+          deliverImportOutcome(appContext, message);
+        }
+      }, "saf-export").start();
+    } catch (final Throwable t) {
+      exportInProgress.set(false);
+      throw t;
+    }
+  }
 
   /**
    * Copy the picked tree into our Websites directory, entirely off the UI thread: even walking
@@ -3014,6 +3123,11 @@ public class HTTrackActivity extends FragmentActivity {
         importMirrorsFrom(data.getData());
       }
       break;
+    case ACTIVITY_EXPORT_TREE:
+      if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+        exportMirrorToSaf(data.getData());
+      }
+      break;
     case ACTIVITY_BROWSER_LOGIN:
       if (resultCode == Activity.RESULT_OK && data != null) {
         applyBrowserLogin(data);
@@ -3242,20 +3356,16 @@ public class HTTrackActivity extends FragmentActivity {
     switch (item.getItemId()) {
     case R.id.action_about:
       final String about = getString(R.string.about_credits);
-      final String about0 = getString(R.string.app_name);
+      final String about0 = getString(R.string.app_name) + " " + versionName
+          + " (" + versionCode + ")";
       final String aboutLegal = getTextResource(R.raw.legal);
-      new AlertDialog.Builder(this).setTitle("About")
-          .setMessage(about0 + "\n" + about + "\n\n" + aboutLegal).show();
+      new AlertDialog.Builder(this).setTitle(R.string.action_about)
+          .setMessage(about0 + "\n" + about + "\n\n" + aboutLegal)
+          .setPositiveButton(android.R.string.ok, null).show();
       break;
     case R.id.action_license:
       Loopback.open(this, getResourceFile(), new File(new File(getResourceFile(), "license"),
           "gpl-3.0-standalone.html"), null, true);
-      break;
-    case R.id.action_forum:
-      browse(Uri.parse("http://forum.httrack.com/"));
-      break;
-    case R.id.action_website:
-      browse(Uri.parse("http://www.httrack.com/"));
       break;
     case R.id.action_help:
       Help.show(this, getResourceFile(), Help.pageForPane(pane_id));

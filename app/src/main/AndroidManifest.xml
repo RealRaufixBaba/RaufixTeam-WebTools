@@ -12,12 +12,9 @@
          once the user leaves the app. A normal permission, and harmless below API 34. -->
     <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
 
-    <!-- Mirrors live in public storage so other apps (browsers, file managers) can use them.
-         Below API 30 the legacy write permission suffices; from API 30 on it needs all-files
-         access, granted from a settings screen. -->
+    <!-- Legacy write permission for API <= 29; API 30+ uses app-scoped storage and SAF export. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Required by the job's connectivity constraint: JobScheduler.schedule throws a
          SecurityException without it. A normal permission, with no runtime prompt. -->

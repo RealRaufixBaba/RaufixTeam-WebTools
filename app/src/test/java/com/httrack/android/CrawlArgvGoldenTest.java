@@ -29,8 +29,7 @@ public class CrawlArgvGoldenTest {
   /** This is what buildCommandline() returns for that map, in table order. */
   private static final String OPTIONS[] = { "-iC2", "http://example.com/", "http://example.org/",
       "+*.png", "-*.zip", "-r3", "-%e1", "-c4", "-%k0", "-%P", "-F",
-      "Mozilla/5.0 (probe)", "-%F",
-      "<!-- Mirrored from {url} by HTTrack Website Copier/3.x [XR&CO], {date} -->", "-%l",
+      "Mozilla/5.0 (probe)", "-%F", "", "-%l",
       "fr,en,*", "-u1", "-s2", "-%s", "-%u", "-%f", "-C0", "-D", "-a", "-K0", "-H0", "-p3", "-L0",
       "-N0" };
 

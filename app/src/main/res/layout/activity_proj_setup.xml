@@ -40,6 +40,15 @@
             android:onClick="onClickBrowserLogin"
             android:text="@string/browser_login" />
 
+        <CheckBox
+            android:id="@+id/checkAllowLanArchiving"
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="4dp"
+            android:checked="false"
+            android:text="@string/allow_lan_archiving" />
+
         <LinearLayout
             android:layout_width="fill_parent"
             android:layout_height="wrap_content"

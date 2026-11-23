@@ -119,6 +119,7 @@ LOCAL_CFLAGS += -DHTS_INTERNAL_BYTECODE
 # The app never asks the engine for a self-test. The sources are gone from
 # LOCAL_SRC_FILES above too, because htsselftest_int.h #errors under this macro.
 LOCAL_CFLAGS += -DHTS_NO_SELFTEST
+LOCAL_CFLAGS += -include $(LOCAL_PATH)/include/android_lfs_compat.h
 LOCAL_CPPFLAGS += -pthread
 include $(BUILD_SHARED_LIBRARY)
 
@@ -139,5 +140,6 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/httrack/src	\
 LOCAL_SHARED_LIBRARIES := libhttrack
 LOCAL_LDLIBS := -llog
 LOCAL_CFLAGS := -O3 -g -funwind-tables -DHAVE_CONFIG_H -DHTS_INTERNAL_BUILD \
-	-W -Wall -Wextra -Werror -Wno-unused-parameter
+	-W -Wall -Wextra -Werror -Wno-unused-parameter \
+	-include $(LOCAL_PATH)/include/android_lfs_compat.h
 include $(BUILD_SHARED_LIBRARY)

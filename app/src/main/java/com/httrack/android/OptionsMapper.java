@@ -262,16 +262,15 @@ public class OptionsMapper {
       new Pair<String, String>("GlobalTravel", "0"),
       new Pair<String, String>("RewriteLinks", "0"),
       new Pair<String, String>("BuildString", "%h%p/%n%q.%t"),
-      // Empty: no -F, so the engine supplies its own current versioned User-Agent.
-      new Pair<String, String>("UserID", ""),
+      // Identify as RaufixTeam WebTools by default; users can still override in Browser ID.
+      new Pair<String, String>("UserID",
+          "Mozilla/5.0 (compatible; RaufixTeam-WebTools/1.0)"),
       new Pair<String, String>("ProxyType", "0"),
       new Pair<String, String>("KeepWww", "0"),
       new Pair<String, String>("KeepSlashes", "0"),
       new Pair<String, String>("KeepQueryOrder", "0"),
-      /* A single %s anywhere puts the whole template back on the engine's
-       * legacy positional path, where named fields render verbatim. */
-      new Pair<String, String>("Footer",
-          "<!-- Mirrored from {url} by HTTrack Website Copier/3.x [XR&CO], {date} -->"),
+      /* Empty by default: emitted explicitly as -%F "" so the engine injects no promo footer. */
+      new Pair<String, String>("Footer", ""),
       new Pair<String, String>("AcceptLanguage", "en,*"),
       new Pair<String, String>("OtherHeaders", ""),
       new Pair<String, String>("DefaultReferer", ""),
@@ -366,7 +365,8 @@ public class OptionsMapper {
       new Pair<String, OptionMapper>("BuildString",
           buildHandler.getCustomMapper()),
       new Pair<String, OptionMapper>("UserID", new ArgumentOption("-F")),
-      new Pair<String, OptionMapper>("Footer", new ArgumentOption("-%F")),
+      new Pair<String, OptionMapper>("Footer",
+          new AllowEmptyArgumentOption("-%F")),
       new Pair<String, OptionMapper>("AcceptLanguage",
           new ArgumentOption("-%l")),
       new Pair<String, OptionMapper>("AcceptDefault",
@@ -1802,6 +1802,21 @@ public class OptionsMapper {
         commandline.add(option);
         commandline.add(value);
       }
+    }
+  }
+
+  /** Argument option that also emits empty strings so defaults in the C engine can be cleared. */
+  public static class AllowEmptyArgumentOption implements OptionMapper {
+    protected final String option;
+
+    public AllowEmptyArgumentOption(final String option) {
+      this.option = option;
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      commandline.add(option);
+      commandline.add(value != null ? value : "");
     }
   }
 

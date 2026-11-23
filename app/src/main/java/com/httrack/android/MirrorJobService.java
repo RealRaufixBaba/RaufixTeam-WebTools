@@ -42,6 +42,7 @@ public final class MirrorJobService extends JobService {
   static final String EXTRA_PROJECT_ROOT = "com.httrack.android.job.projectRoot";
   static final String EXTRA_RESOURCES = "com.httrack.android.job.resources";
   static final String EXTRA_OPTIONS = "com.httrack.android.job.options";
+  static final String EXTRA_ALLOW_LAN = "com.httrack.android.job.allowLan";
 
   /** The shortest gap between two progress notifications. */
   static final long PROGRESS_INTERVAL_MS = 1000L;
@@ -94,8 +95,18 @@ public final class MirrorJobService extends JobService {
    *          the engine options the option map emitted
    * @return true when the system accepted the job
    */
+  private static JobScheduler jobScheduler(final Context context) {
+    return (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+  }
+
   static boolean schedule(final Context context, final String projectName, final File target,
       final File projectRoot, final File resources, final List<String> options) {
+    return schedule(context, projectName, target, projectRoot, resources, options, false);
+  }
+
+  static boolean schedule(final Context context, final String projectName, final File target,
+      final File projectRoot, final File resources, final List<String> options,
+      final boolean allowLan) {
     if (target == null || projectRoot == null || resources == null) {
       return false;
     }
@@ -107,6 +118,7 @@ public final class MirrorJobService extends JobService {
     extras.putString(EXTRA_PROJECT_ROOT, projectRoot.getAbsolutePath());
     extras.putString(EXTRA_RESOURCES, resources.getAbsolutePath());
     extras.putStringArray(EXTRA_OPTIONS, options.toArray(new String[] {}));
+    extras.putInt(EXTRA_ALLOW_LAN, allowLan ? 1 : 0);
 
     final JobInfo job = new JobInfo.Builder(JOB_ID,
         new ComponentName(context, MirrorJobService.class)).setUserInitiated(true)
@@ -117,7 +129,7 @@ public final class MirrorJobService extends JobService {
         .setEstimatedNetworkBytes(JobInfo.NETWORK_BYTES_UNKNOWN, JobInfo.NETWORK_BYTES_UNKNOWN)
         .setExtras(extras).build();
 
-    final JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+    final JobScheduler scheduler = jobScheduler(context);
     if (scheduler == null) {
       Log.w("MirrorJobService", "no job scheduler; the activity keeps the crawl");
       return false;
@@ -173,8 +185,19 @@ public final class MirrorJobService extends JobService {
    * @return true when a job is pending or running
    */
   static boolean isPending(final Context context) {
-    final JobScheduler scheduler = context.getSystemService(JobScheduler.class);
-    return scheduler != null && scheduler.getPendingJob(JOB_ID) != null;
+    final JobScheduler scheduler = jobScheduler(context);
+    if (scheduler == null) {
+      return false;
+    }
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+      return scheduler.getPendingJob(JOB_ID) != null;
+    }
+    for (final JobInfo info : scheduler.getAllPendingJobs()) {
+      if (info.getId() == JOB_ID) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -185,7 +208,7 @@ public final class MirrorJobService extends JobService {
    *          any context of this app
    */
   static void cancel(final Context context) {
-    final JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+    final JobScheduler scheduler = jobScheduler(context);
     if (scheduler != null) {
       scheduler.cancel(JOB_ID);
     }
@@ -219,6 +242,8 @@ public final class MirrorJobService extends JobService {
     final File projectRoot = new File(string(extras, EXTRA_PROJECT_ROOT));
     final File resources = new File(string(extras, EXTRA_RESOURCES));
     final String[] options = extras.getStringArray(EXTRA_OPTIONS);
+    final boolean allowLan = extras.getInt(EXTRA_ALLOW_LAN, 0) != 0;
+    HTTrackLib.setAllowLanArchiving(allowLan);
     final CrawlRun run = new CrawlRun(getApplicationContext(),
         new JobOwner(target, projectRoot, resources, options),
         HTTrackActivity.crawlMessages(this));

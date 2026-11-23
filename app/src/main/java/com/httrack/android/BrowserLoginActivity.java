@@ -211,11 +211,21 @@ public class BrowserLoginActivity extends FragmentActivity {
 
     @Override
     public boolean shouldOverrideUrlLoading(final WebView view, final WebResourceRequest request) {
-      final String url = request.getUrl().toString();
-      if (BrowserLoginPolicy.hostOf(url) != null) {
+      return handleUrlLoading(request.getUrl().toString());
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public boolean shouldOverrideUrlLoading(final WebView view, final String url) {
+      return handleUrlLoading(url);
+    }
+
+    private boolean handleUrlLoading(final String url) {
+      if (BrowserLoginPolicy.hostOf(url) != null
+          && UrlSafetyPolicy.checkUrl(url, false) == UrlSafetyPolicy.Verdict.ALLOWED) {
         return false;
       }
-      // No cleartext permission is declared, so http stays blank.
+      // No cleartext permission is declared, and local/private/metadata targets are blocked.
       Toast.makeText(BrowserLoginActivity.this,
           getString(R.string.browser_login_https_only), Toast.LENGTH_LONG).show();
       return true;

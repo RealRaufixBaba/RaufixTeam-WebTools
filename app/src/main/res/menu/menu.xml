@@ -9,16 +9,8 @@
         android:orderInCategory="150"
         android:title="@string/action_import_mirrors"/>
     <item
-        android:id="@+id/action_website"
-        android:orderInCategory="200"
-        android:title="@string/action_website"/>
-    <item
-        android:id="@+id/action_forum"
-        android:orderInCategory="200"
-        android:title="@string/action_forum"/>
-    <item
         android:id="@+id/action_license"
-        android:orderInCategory="300"
+        android:orderInCategory="250"
         android:title="@string/action_license"/>
     <item
         android:id="@+id/action_about"

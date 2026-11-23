@@ -23,12 +23,17 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 #include <jni.h>
 #include <assert.h>
 #include <pthread.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -47,6 +52,251 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 /* Recovering a fault is a siglongjmp, which unwinds nothing: the engine's process-wide mutexes
  * and the heap stay as the faulting frame left them, so the engine is refused from here on. */
 static volatile int engineFaulted = 0;
+
+/* Default-deny LAN/loopback/private SSRF policy; cloud metadata is always blocked. */
+static volatile int allowLanArchiving = 0;
+
+static int rwt_ends_with_ci(const char *str, const char *suffix) {
+  const size_t slen = strlen(str);
+  const size_t xlen = strlen(suffix);
+  size_t i;
+  if (slen < xlen) {
+    return 0;
+  }
+  for (i = 0; i < xlen; i++) {
+    if (tolower((unsigned char)str[slen - xlen + i]) !=
+        tolower((unsigned char)suffix[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int rwt_is_blocked_ipv4_bytes(const unsigned char b[4], int allow_lan) {
+  const unsigned int o0 = b[0];
+  const unsigned int o1 = b[1];
+  const unsigned int o2 = b[2];
+  const unsigned int o3 = b[3];
+
+  /* Cloud metadata endpoints (AWS/GCP/Azure/ECS/Alibaba) — always blocked. */
+  if ((o0 == 169 && o1 == 254 && o2 == 169 && o3 == 254) ||
+      (o0 == 169 && o1 == 254 && o2 == 170 && o3 == 2) ||
+      (o0 == 100 && o1 == 100 && o2 == 100 && o3 == 200)) {
+    return 1;
+  }
+  /* Unspecified (0.0.0.0/8) and multicast/reserved (224.0.0.0/4+) — always blocked. */
+  if (o0 == 0 || o0 >= 224) {
+    return 1;
+  }
+  if (!allow_lan) {
+    if (o0 == 127 || o0 == 10 ||
+        (o0 == 172 && o1 >= 16 && o1 <= 31) ||
+        (o0 == 192 && o1 == 168) ||
+        (o0 == 169 && o1 == 254) ||
+        (o0 == 100 && o1 >= 64 && o1 <= 127)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int rwt_is_blocked_ipv6_bytes(const unsigned char b[16], int allow_lan) {
+  int i;
+  int all_zero = 1;
+  int mapped_v4 = 1;
+
+  for (i = 0; i < 10; i++) {
+    if (b[i] != 0) {
+      mapped_v4 = 0;
+      break;
+    }
+  }
+  if (mapped_v4 && b[10] == 0xff && b[11] == 0xff) {
+    return rwt_is_blocked_ipv4_bytes(&b[12], allow_lan);
+  }
+
+  /* AWS IPv6 IMDS fd00:ec2::254 — always blocked. */
+  if (b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2 &&
+      b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+      b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0 &&
+      b[12] == 0 && b[13] == 0 && b[14] == 0x02 && b[15] == 0x54) {
+    return 1;
+  }
+
+  /* Unspecified :: */
+  for (i = 0; i < 16; i++) {
+    if (b[i] != 0) {
+      all_zero = 0;
+      break;
+    }
+  }
+  if (all_zero) {
+    return 1;
+  }
+  /* Multicast ff00::/8 */
+  if (b[0] == 0xff) {
+    return 1;
+  }
+  if (!allow_lan) {
+    /* ::1 loopback */
+    int loopback = 1;
+    for (i = 0; i < 15; i++) {
+      if (b[i] != 0) {
+        loopback = 0;
+        break;
+      }
+    }
+    if (loopback && b[15] == 1) {
+      return 1;
+    }
+    /* ULA fc00::/7 */
+    if ((b[0] & 0xfe) == 0xfc) {
+      return 1;
+    }
+    /* Link-local fe80::/10 or site-local fec0::/10 */
+    if (b[0] == 0xfe && ((b[1] & 0xc0) == 0x80 || (b[1] & 0xc0) == 0xc0)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void rwt_extract_clean_host(const char *adr, char *out, size_t out_sz) {
+  const char *start = adr;
+  size_t len = 0;
+  if (adr == NULL || out_sz == 0) {
+    if (out_sz > 0) {
+      out[0] = '\0';
+    }
+    return;
+  }
+  if (strncmp(start, "http://", 7) == 0) {
+    start += 7;
+  } else if (strncmp(start, "https://", 8) == 0) {
+    start += 8;
+  } else if (strncmp(start, "ftp://", 6) == 0) {
+    start += 6;
+  }
+  if (start[0] == '[') {
+    const char *close = strchr(start + 1, ']');
+    if (close != NULL) {
+      start += 1;
+      len = (size_t)(close - start);
+    }
+  } else {
+    const char *colon = strchr(start, ':');
+    const char *slash = strchr(start, '/');
+    const char *end = start + strlen(start);
+    if (colon != NULL && colon < end) {
+      end = colon;
+    }
+    if (slash != NULL && slash < end) {
+      end = slash;
+    }
+    len = (size_t)(end - start);
+  }
+  if (len >= out_sz) {
+    len = out_sz - 1;
+  }
+  memcpy(out, start, len);
+  out[len] = '\0';
+  while (len > 0 && out[len - 1] == '.') {
+    out[--len] = '\0';
+  }
+}
+
+static int rwt_is_host_blocked(const char *adr) {
+  char host[256];
+  int allow_lan;
+  struct in_addr v4;
+  struct in6_addr v6;
+  struct addrinfo hints;
+  struct addrinfo *res = NULL;
+  struct addrinfo *rp;
+
+  if (adr == NULL || adr[0] == '\0') {
+    return 0;
+  }
+  if (strncasecmp(adr, "file://", 7) == 0 ||
+      strncasecmp(adr, "javascript:", 11) == 0 ||
+      strncasecmp(adr, "content://", 10) == 0 ||
+      strncasecmp(adr, "data:", 5) == 0) {
+    return 1;
+  }
+
+  rwt_extract_clean_host(adr, host, sizeof(host));
+  if (host[0] == '\0') {
+    return 0;
+  }
+  /* HTTrack virtual primary pseudo-host. */
+  if (strcasecmp(host, "primary") == 0) {
+    return 0;
+  }
+
+  /* Unconditional cloud metadata names. */
+  if (strcasecmp(host, "metadata.google.internal") == 0 ||
+      strcasecmp(host, "metadata") == 0 ||
+      strcasecmp(host, "instance-data") == 0 ||
+      rwt_ends_with_ci(host, ".metadata.google.internal")) {
+    return 1;
+  }
+
+  allow_lan = __atomic_load_n(&allowLanArchiving, __ATOMIC_ACQUIRE);
+  if (!allow_lan) {
+    if (strcasecmp(host, "localhost") == 0 ||
+        rwt_ends_with_ci(host, ".localhost") ||
+        rwt_ends_with_ci(host, ".local") ||
+        rwt_ends_with_ci(host, ".internal")) {
+      return 1;
+    }
+  }
+
+  if (inet_pton(AF_INET, host, &v4) == 1) {
+    return rwt_is_blocked_ipv4_bytes((const unsigned char *)&v4.s_addr, allow_lan);
+  }
+  if (inet_pton(AF_INET6, host, &v6) == 1) {
+    return rwt_is_blocked_ipv6_bytes(v6.s6_addr, allow_lan);
+  }
+
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(host, NULL, &hints, &res) == 0 && res != NULL) {
+    int blocked = 0;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+      if (rp->ai_family == AF_INET) {
+        const struct sockaddr_in *sa4 = (const struct sockaddr_in *)rp->ai_addr;
+        if (rwt_is_blocked_ipv4_bytes((const unsigned char *)&sa4->sin_addr.s_addr, allow_lan)) {
+          blocked = 1;
+          break;
+        }
+      } else if (rp->ai_family == AF_INET6) {
+        const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *)rp->ai_addr;
+        if (rwt_is_blocked_ipv6_bytes(sa6->sin6_addr.s6_addr, allow_lan)) {
+          blocked = 1;
+          break;
+        }
+      }
+    }
+    freeaddrinfo(res);
+    if (blocked) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int rwt_check_link(t_hts_callbackarg *carg, httrackp *opt,
+                          const char *adr, const char *fil, int status) {
+  if (rwt_is_host_blocked(adr)) {
+    return 1; /* 1 = refuse link in HTTrack check_link convention */
+  }
+  if (CALLBACKARG_PREV_FUN(carg, check_link) != NULL) {
+    return CALLBACKARG_PREV_FUN(carg, check_link)(
+        CALLBACKARG_PREV_CARG(carg), opt, adr, fil, status);
+  }
+  return -1; /* leave engine's own verdict alone */
+}
 
 #ifdef USE_COFFEECATCH
 #include "coffeecatch.h"
@@ -1280,6 +1530,7 @@ jint HTTrackLib_main(JNIEnv* env, jobject object, jobjectArray stringArray) {
       runningOpt = context->opt;
       MUTEX_UNLOCK(runningOptLock);
       CHAIN_FUNCTION(context->opt, loop, htsshow_loop, &t);
+      CHAIN_FUNCTION(context->opt, check_link, rwt_check_link, NULL);
     } else {
       already_running = 1;
     }
@@ -1363,6 +1614,14 @@ jint HTTrackLib_main(JNIEnv* env, jobject object, jobjectArray stringArray) {
     throwRuntimeException(env, format);
     return -1;
   }
+}
+
+JNICALL void
+Java_com_httrack_android_jni_HTTrackLib_setAllowLanArchiving(JNIEnv* env, jclass clazz,
+                                                             jboolean allow) {
+  (void) env;
+  (void) clazz;
+  __atomic_store_n(&allowLanArchiving, allow == JNI_TRUE ? 1 : 0, __ATOMIC_RELEASE);
 }
 
 JNICALL jint

@@ -42,6 +42,10 @@ JNIEXPORT jboolean JNICALL
 Java_com_httrack_android_jni_HTTrackLib_nativeHasFaulted(JNIEnv* env, jclass clazz);
 
 JNIEXPORT void JNICALL
+Java_com_httrack_android_jni_HTTrackLib_setAllowLanArchiving(JNIEnv* env, jclass clazz,
+                                                             jboolean allow);
+
+JNIEXPORT void JNICALL
 Java_com_httrack_android_jni_HTTrackLib_init(JNIEnv* env, jobject object);
 
 JNIEXPORT void JNICALL

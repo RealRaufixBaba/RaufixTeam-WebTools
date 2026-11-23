@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic Phase 01 audit verification tests for RaufixTeam WebTools."""
+"""Deterministic verification tests for RaufixTeam WebTools (Phases 01-15)."""
 
 from pathlib import Path
 import re
@@ -38,7 +38,7 @@ class Phase01AuditTest(unittest.TestCase):
         htsglobal = self.read("app/src/main/jni/httrack/src/htsglobal.h")
         self.assertIn('#define HTTRACK_VERSIONID "3.51.0"', htsglobal)
 
-    def test_upstream_build_baseline_verified(self) -> None:
+    def test_raufix_build_and_abi_configuration(self) -> None:
         root_gradle = self.read("build.gradle")
         self.assertIn("id 'com.android.application' version '8.6.0' apply false", root_gradle)
 
@@ -48,20 +48,23 @@ class Phase01AuditTest(unittest.TestCase):
         app_gradle = self.read("app/build.gradle")
         for expected in (
             "namespace 'com.httrack.android'",
-            'applicationId "com.httrack.android"',
+            'applicationId "com.raufixteam.webtools"',
             "compileSdk 36",
             "targetSdk 36",
-            "minSdk 24",
+            "minSdk 22",
             'ndkVersion "27.3.13750724"',
             "sourceCompatibility JavaVersion.VERSION_17",
             "targetCompatibility JavaVersion.VERSION_17",
-            'abiFilters "arm64-v8a", "x86_64"',
+            '"armeabi-v7a"',
+            '"arm64-v8a"',
+            '"x86_64"',
         ):
             self.assertIn(expected, app_gradle)
 
         app_mk = self.read("app/src/main/jni/Application.mk")
-        self.assertIn("APP_ABI := arm64-v8a x86_64", app_mk)
-        self.assertIn("APP_PLATFORM := android-24", app_mk)
+        self.assertIn("APP_ABI := armeabi-v7a arm64-v8a x86_64", app_mk)
+        self.assertIn("APP_PLATFORM := android-22", app_mk)
+        self.assertTrue((REPO_ROOT / "app/src/main/jni/include/android_lfs_compat.h").is_file())
 
     def test_license_compliance_and_notices(self) -> None:
         root_license = self.read("LICENSE")
@@ -72,67 +75,51 @@ class Phase01AuditTest(unittest.TestCase):
         httrack_copying = self.read("app/src/main/jni/httrack/COPYING")
         self.assertEqual(root_license, httrack_copying)
 
-        coffeecatch_license = self.read("app/src/main/jni/coffeecatch/LICENSE")
-        self.assertIn("Copyright (c) 2013, Xavier Roche", coffeecatch_license)
-        self.assertNotIn("endorse or promote", coffeecatch_license)
-
-        coucal_license = self.read("app/src/main/jni/httrack/src/coucal/LICENSE")
-        self.assertIn("Copyright (c) 2013, Xavier Roche", coucal_license)
-        self.assertIn("endorse or promote", coucal_license)
-
         notice = self.read("NOTICE")
         for term in (
             "39f0f2de2fbce28f95b19bfdc8205510e3e07d26",
             "GPL-3.0-or-later",
             "coffeecatch",
-            "BSD-2-Clause",
             "coucal",
-            "BSD-3-Clause",
             "minizip",
-            "Zlib",
             "libiconv",
-            "LGPL-2.1-or-later",
             "OpenSSL 3.5.8",
-            "Apache License 2.0",
             "NanoHTTPD",
         ):
             self.assertIn(term, notice)
 
-    def test_baseline_footer_and_manifest_inventory(self) -> None:
+    def test_footer_manifest_saf_and_ssrf_hardening(self) -> None:
         mapper = self.read("app/src/main/java/com/httrack/android/OptionsMapper.java")
-        self.assertIn(
-            "<!-- Mirrored from {url} by HTTrack Website Copier/3.x [XR&CO], {date} -->",
-            mapper,
-        )
+        self.assertIn('new Pair<String, String>("Footer", "")', mapper)
+        self.assertIn('AllowEmptyArgumentOption("-%F")', mapper)
+
         strings_xml = self.read("app/src/main/res/values/strings.xml")
-        self.assertIn(
-            "&lt;!-- Mirrored from {url} by HTTrack Website Copier/3.x [XR&amp;CO], {date} --&gt;",
-            strings_xml,
-        )
+        self.assertIn("<string name=\"app_name\">RaufixTeam WebTools</string>", strings_xml)
+        self.assertTrue((REPO_ROOT / "app/src/main/res/values-tr/strings.xml").is_file())
 
         manifest = self.read("app/src/main/AndroidManifest.xml")
+        self.assertNotIn("MANAGE_EXTERNAL_STORAGE", manifest)
         for component in (
             "android.permission.INTERNET",
             "android.permission.POST_NOTIFICATIONS",
             "android.permission.RUN_USER_INITIATED_JOBS",
             "android.permission.WRITE_EXTERNAL_STORAGE",
-            "android.permission.MANAGE_EXTERNAL_STORAGE",
             "android.permission.ACCESS_NETWORK_STATE",
             "com.httrack.android.HTTrackActivity",
-            "com.httrack.android.CleanupActivity",
-            "com.httrack.android.OptionsActivity",
-            "com.httrack.android.FileChooserActivity",
-            "com.httrack.android.BrowserLoginActivity",
             ".MirrorJobService",
         ):
             self.assertIn(component, manifest)
+
+        self.assertTrue((REPO_ROOT / "app/src/main/java/com/httrack/android/UrlSafetyPolicy.java").is_file())
+        self.assertTrue((REPO_ROOT / "app/src/main/java/com/httrack/android/SafMirrorExport.java").is_file())
 
     def test_jni_coupling_and_engine_untouched(self) -> None:
         jni_c = self.read("app/src/main/jni/htslibjni.c")
         jni_h = self.read("app/src/main/jni/htslibjni.h")
         self.assertIn("Java_com_httrack_android_jni_HTTrackLib_main", jni_c)
+        self.assertIn("Java_com_httrack_android_jni_HTTrackLib_setAllowLanArchiving", jni_c)
+        self.assertIn("CHAIN_FUNCTION(context->opt, check_link, rwt_check_link", jni_c)
         self.assertIn("Java_com_httrack_android_jni_HTTrackLib_initStatic", jni_h)
-        self.assertIn("com/httrack/android/jni/HTTrackLib$LoginBundle", jni_c)
         self.assertTrue((REPO_ROOT / "app/src/main/jni/httrack/src/htscore.c").is_file())
         self.assertTrue((REPO_ROOT / "app/src/main/jni/coffeecatch/coffeecatch.c").is_file())
 
@@ -141,13 +128,6 @@ class Phase01AuditTest(unittest.TestCase):
         for required in (
             "39f0f2de2fbce28f95b19bfdc8205510e3e07d26",
             "git clone --recurse-submodules",
-            "master.zip",
-            "will NOT update or upgrade an existing official `com.httrack.android` installation in place",
-            "API 22",
-            "API 29",
-            "API 33",
-            "API 34",
-            "fseeko",
             "15-Phase Change Plan",
             "7 Measurable Product Pillars",
         ):

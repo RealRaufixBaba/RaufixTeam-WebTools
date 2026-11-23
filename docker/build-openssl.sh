@@ -26,7 +26,7 @@ if [ "$OPENSSL_VERSION" != "$DEFAULT_VERSION" ] && [ "$OPENSSL_SHA256" = "$DEFAU
 fi
 MIN_API="${MIN_API:-21}"
 OUT="${OUT:-/opt/openssl-android}"
-ABIS="${ABIS:-arm64-v8a x86_64}"
+ABIS="${ABIS:-armeabi-v7a arm64-v8a x86_64}"
 
 : "${ANDROID_NDK_ROOT:?set ANDROID_NDK_ROOT}"
 HOST_TAG="linux-x86_64"
