@@ -166,16 +166,47 @@ final class SafMirrorExport {
       if ("json".equals(ext)) {
         return "application/json";
       }
+      if ("xml".equals(ext)) {
+        return "application/xml";
+      }
+      if ("svg".equals(ext)) {
+        return "image/svg+xml";
+      }
+      if ("txt".equals(ext) || "log".equals(ext)) {
+        return "text/plain";
+      }
       if ("png".equals(ext)) {
         return "image/png";
       }
       if ("jpg".equals(ext) || "jpeg".equals(ext)) {
         return "image/jpeg";
       }
-      final MimeTypeMap map = MimeTypeMap.getSingleton();
-      final String mime = map != null ? map.getMimeTypeFromExtension(ext) : null;
-      if (mime != null && !mime.isEmpty()) {
-        return mime;
+      if ("gif".equals(ext)) {
+        return "image/gif";
+      }
+      if ("webp".equals(ext)) {
+        return "image/webp";
+      }
+      if ("woff2".equals(ext)) {
+        return "font/woff2";
+      }
+      if ("woff".equals(ext)) {
+        return "font/woff";
+      }
+      if ("pdf".equals(ext)) {
+        return "application/pdf";
+      }
+      if ("zip".equals(ext)) {
+        return "application/zip";
+      }
+      try {
+        final MimeTypeMap map = MimeTypeMap.getSingleton();
+        final String mime = map != null ? map.getMimeTypeFromExtension(ext) : null;
+        if (mime != null && !mime.isEmpty()) {
+          return mime;
+        }
+      } catch (final RuntimeException ignored) {
+        // Android JVM unit tests stub MimeTypeMap.getSingleton() as not-mocked.
       }
     }
     return "application/octet-stream";

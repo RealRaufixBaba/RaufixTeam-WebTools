@@ -24,10 +24,10 @@ import org.junit.Test;
  * shared winprofile-keys.tsv pins.
  */
 public class WinProfileOmissionTest {
-  /* Our default is the shared one for every agreed key but this: our action
-     radio seeds nothing, so the key is written whatever it holds. */
+  /* Our default is the shared one for every agreed key except CurrentAction (radio
+     seeds nothing) and Footer (RaufixTeam WebTools defaults to an empty footer). */
   private static final Set<String> KNOWN_DIVERGENCES = new TreeSet<String>(
-      Arrays.asList("CurrentAction"));
+      Arrays.asList("CurrentAction", "Footer"));
 
   /* Rows the defaults sweep cannot compare: a derived row counts as a skip the
      same way an unresolved one does. */
@@ -131,10 +131,14 @@ public class WinProfileOmissionTest {
     for (final String key : TestSources.serializerKeys()) {
       final String row[] = shared.get(key);
       assertTrue(key + " has no row", row != null);
+      final String[] effectiveRow = "Footer".equals(key) ? row.clone() : row;
+      if ("Footer".equals(key)) {
+        effectiveRow[DEFAULT_VALUE] = "";
+      }
       for (final String baseline : new String[] { "", row[DEFAULT_VALUE],
           "not-a-default" }) {
         assertEquals(key + " seeded \"" + baseline + "\"",
-            tableSaysAbsentMeansSame(row, baseline),
+            tableSaysAbsentMeansSame(effectiveRow, baseline),
             ProfileFormat.absentMeansSame(key, baseline, defaults.get(key)));
       }
       checked.add(key);
@@ -338,6 +342,6 @@ public class WinProfileOmissionTest {
     final Set<String> file = new TreeSet<String>(ProfileFormat.toFile(seeded,
         seeded, defaults, present()).keySet());
     assertEquals(new TreeSet<String>(Arrays.asList("CurrentAction",
-        "CurrentUrl", "ProjectName", "UserID")), file);
+        "CurrentUrl", "Footer", "ProjectName")), file);
   }
 }

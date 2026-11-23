@@ -18,10 +18,11 @@ import org.junit.Test;
  *  file and held lock it faulted with. Every entry point back into it has to refuse from then on,
  *  and the app has to end the process rather than run on top of that. */
 public class NativeFaultLatchTest {
-  /** Entry points that may skip the latch: four that only read their arguments, and the load
-   *  hook that runs once before any of this. */
+  /** Entry points that may skip the latch: pure argument/flag helpers that never touch engine
+   *  state, and the load hook that runs once before any of this. */
   private static final Set<String> UNGUARDED = new TreeSet<String>(Arrays.asList(
-      "getAcceptPreset", "getCustomHeaderVerdict", "getFeatures", "getVersion", "initStatic"));
+      "getAcceptPreset", "getCustomHeaderVerdict", "getFeatures", "getVersion", "initStatic",
+      "setAllowLanArchiving"));
 
   private static final Pattern ENTRY_POINT = Pattern.compile(
       "(?m)^(?:JNICALL\\s+\\w+\\s+)?Java_com_httrack_android_jni_HTTrackLib_(\\w+)\\s*\\(");
