@@ -1,0 +1,331 @@
+/*
+HTTrack Android Java Interface.
+
+HTTrack Website Copier, Offline Browser for Windows and Unix
+Copyright (C) Xavier Roche and other contributors
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 3
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ */
+
+package com.httrack.android.jni;
+
+import java.io.File;
+import java.io.IOException;
+
+import android.content.Context;
+import android.os.Build;
+import android.util.Log;
+
+public class HTTrackLib {
+  private static final String TAG = HTTrackLib.class.getName();
+
+  /**
+   * Opaque native context.
+   **/
+  private long nativeObject;
+
+  /**
+   * Statistics.
+   **/
+  protected final HTTrackCallbacks callbacks;
+
+  /**
+   * Load of native libraries tried
+   **/
+  protected static boolean loadDone = false;
+
+  /**
+   * Exception during startup.
+   **/
+  protected static Throwable exception;
+
+  /**
+   * Check whether the library initialized successfully or not (ie. link error)
+   */
+  public static boolean loadedSuccessfully() {
+    return HTTrackLib.exception == null;
+  }
+
+  /**
+   * Has a load already been tried in this process? False means no activity has run here, so the
+   * engine has no root path yet.
+   */
+  public static boolean loadAttempted() {
+    return HTTrackLib.loadDone;
+  }
+
+  /**
+   * Return the error encounted while loading this library, if any
+   */
+  public static Throwable loadError() {
+    return HTTrackLib.exception;
+  }
+
+  /**
+   * Get the current library version, as MAJOR.MINOR.SUBRELEASE string.
+   *
+   * @return the current library version
+   */
+  public static native String getVersion();
+
+  /**
+   * Get the current library features, as a string of [+-]tag.
+   *
+   * @return the current library features.
+   */
+  public static native String getFeatures();
+
+  /**
+   * The Accept header a browser sends for one kind of link, which the Accept headers box offers
+   * as a suggestion. A pure table lookup, so it needs no engine and no root path.
+   *
+   * @param browser "chrome", "firefox" or "legacy", compared exactly
+   * @param kind    the kind word, empty for the row every other kind falls back to
+   * @return the value, or null when that browser has none
+   */
+  public static native String getAcceptPreset(String browser, String kind);
+
+  /** The engine sends this line as the user typed it. */
+  public static final int HEADER_SENT = 0;
+  /** The engine drops a folded line with no line above it to continue. */
+  public static final int HEADER_DROPPED_ORPHAN_FOLD = 1;
+  /** The engine drops a line that is not "Name: value". */
+  public static final int HEADER_DROPPED_MALFORMED = 2;
+  /** The engine drops a line naming a header it frames itself. */
+  public static final int HEADER_DROPPED_FRAMING = 3;
+  /** The engine sends this line and drops the earlier line of the same field. */
+  public static final int HEADER_SENT_REPLACES_EARLIER = 4;
+  /** The engine sends this line, unless an update or a resume writes that field. */
+  public static final int HEADER_SENT_UNLESS_ENGINE_OVERRIDES = 5;
+
+  /**
+   * What the crawl does with one extra header line, so the Browser ID page can say which lines
+   * it will not send. Needs no engine and no root path, so it is safe to ask before a crawl.
+   *
+   * @param headers every earlier line of the box, the dropped ones included, joined with CRLF,
+   *                or null for the first line. Pass ONE earlier line alone to learn whether
+   *                line replaces that one.
+   * @param line    the line to judge, never null
+   * @return one of the HEADER_ constants above, whose values are the engine's own
+   */
+  public static native int getCustomHeaderVerdict(String headers, String line);
+
+  /** What the engine wrote for a browser login. */
+  public static final class LoginBundle {
+    /** The start URL to put in the address field, ending with the bundle's own suffix. */
+    public final String url;
+
+    /** Cookies the engine kept, which are the ones the crawl will send. */
+    public final int cookies;
+
+    /** Hosts those cookies cover, which is not every host the login visited. */
+    public final int hosts;
+
+    public LoginBundle(final String url, final int cookies, final int hosts) {
+      this.url = url;
+      this.cookies = cookies;
+      this.hosts = hosts;
+    }
+  }
+
+  /**
+   * Write a browser login as a login bundle, which the engine owns end to end: it names the
+   * file, puts an international host into ASCII, refuses an address carrying a password, cuts
+   * the fragment a sign-in returns its token in, drops a cookie outside the bundle's scope,
+   * applies its own caps, and reads the file back through its own loader before keeping it.
+   *
+   * @param paste
+   *          the cookies as Netscape cookies.txt records, one per line
+   * @param folder
+   *          where to write, which has to exist
+   * @param agent
+   *          the browser's User-Agent, sent to the bundle's sites alone
+   * @param url
+   *          the address the login ended on
+   * @param hosts
+   *          the hosts whose cookies to keep besides the address's own, comma-separated, or
+   *          null to keep the address's own alone
+   * @return what it wrote, or null when the engine refused the login
+   */
+  public static native LoginBundle writeLoginBundle(String paste, String folder, String agent,
+      String url, String hosts);
+
+  /**
+   * Has a native fault been recovered in this process ?
+   *
+   * @return true once a fault has been caught, after which every engine call is refused
+   */
+  public static boolean hasFaulted() {
+    return loadDone && loadedSuccessfully() && nativeHasFaulted();
+  }
+
+  private static native boolean nativeHasFaulted();
+
+  /**
+   * Build the top-level index.
+   *
+   * @param path          The target path;
+   * @param templatesPath The templates path directory.
+   * @return 1 upon success
+   */
+  public static int buildTopIndex(final File path, final File templatesPath) {
+    // Refused natively too; answering here spares the callers a fault they only log.
+    if (hasFaulted()) {
+      return 0;
+    }
+    final String p = path.getAbsolutePath() + "/";
+    final String t = templatesPath.getAbsolutePath() + "/";
+    return buildTopIndex(p, t);
+  }
+
+  /** The engine's HTS_EXIT_MIRROR_ABORTED: a mirror started, and the engine gave up on it. */
+  public static final int EXIT_MIRROR_ABORTED = 3;
+
+  /**
+   * Start the engine.
+   *
+   * @param args main() arguments.
+   * @return 0 once the mirror ended, including one the caller stopped, EXIT_MIRROR_ABORTED for
+   * one the engine gave up on, and -1 or 1 for a command line it refused before mirroring
+   * @throws IOException upon error
+   */
+  public native int main(String[] args) throws IOException;
+
+  /**
+   * Stop the engine.
+   *
+   * @return true if the engine was stopped (or at least a request was sent),
+   * false if it has already stopped.
+   */
+  public native boolean stop(boolean force);
+
+  /**
+   * Why the engine aborted the last run, if it did. main() reports that it aborted but not why,
+   * and a few of its guards give up without setting a cause at all.
+   *
+   * @return 0 when the mirror was not aborted, -1 on a fatal write such as a full disk, 1 when a
+   * callback refused to continue, 2 when nothing arrived and the previous session was restored
+   */
+  public native int abortCode();
+
+  /**
+   * Was the last run cut short ? True for a stop() request, and for the size and time caps the
+   * engine enforces itself, which no return code of main() tells apart from a completion.
+   *
+   * @return true if the engine stopped before draining its queue
+   */
+  public native boolean wasStopped();
+
+  /**
+   * Default constructor.
+   */
+  public HTTrackLib() {
+    this(null);
+  }
+
+  /**
+   * Constructor with statistics support.
+   */
+  public HTTrackLib(final HTTrackCallbacks callbacks) {
+    init();
+    this.callbacks = callbacks;
+  }
+
+  @Override
+  public void finalize() {
+    free();
+  }
+
+  /*
+   * Initialize.
+   */
+  protected native void init() throws RuntimeException;
+
+  /*
+   * Static initialization.
+   */
+  private native static void initStatic() throws RuntimeException;
+
+  /*
+   * Initialize root path.
+   */
+  public native static void initRootPath(final String path);
+
+  /*
+   * Free.
+   */
+  protected native void free();
+
+  protected static native int buildTopIndex(String path, String templatesPath);
+
+  public static String getLibraryDirectory(final Context context) {
+    final int sdk_level = android.os.Build.VERSION.SDK_INT;
+
+    if (sdk_level >= Build.VERSION_CODES.GINGERBREAD) {
+      return context.getApplicationInfo().nativeLibraryDir;
+    } else if (sdk_level >= Build.VERSION_CODES.DONUT) {
+      return context.getApplicationInfo().dataDir + "/lib";
+    }
+
+    return "/data/data/" + context.getPackageName() + "/lib";
+  }
+
+  public static boolean loadLibraries() {
+    if (loadDone)
+      return loadedSuccessfully();
+    loadDone = true;
+
+    /**
+     * Load needed native libraries. Remember that we do not have our library
+     * path in the standard library path, and therefore loading "htslibjni" will
+     * just fail because dependencies would not be found. Instead, we have to
+     * load in reverse topological order all dependencies, and only load the
+     * final JNI stub at the end. All libraries, except the final JNI stub, will
+     * be loaded without JNI_OnLoad() being called (because not present for
+     * obvious reasons), and this is perfectly fine.
+     */
+
+    /*
+     * Android seems to have both /system/lib/libcrypto.so and
+     * /system/lib/libssl.so, and Java loads them in priority when using
+     * System.loadLibrary(...) We should either ensure that the system libs are
+     * fine (they seems fine BTW) or explicitly load the
+     * application-cached-library using some dirty magic (ie. giving the
+     * explicit full path and .so) For now, we do not ship the libraries, which
+     * will spare some space, and hope the ABI won't change too much.
+     * EDIT: crypto and ssl are now statically linked
+     */
+
+    try {
+      /** Load all libraries. **/
+      final String[] libraries = { "iconv", "httrack", "htslibjni" };
+      for (final String lib : libraries) {
+        Log.d(TAG, "Loading native library " + lib);
+        System.loadLibrary(lib);
+      }
+
+      /** Static initialization. Throws RuntimeException upon error. **/
+      Log.d(TAG, "Initializing static library");
+      initStatic();
+
+      Log.d(TAG, "Done initializing native libraries successfullt");
+
+      return true;
+    } catch (final Throwable e) {
+      exception = e;
+      return false;
+    }
+  }
+}

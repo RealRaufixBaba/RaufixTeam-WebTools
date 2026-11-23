@@ -1,0 +1,183 @@
+/*
+HTTrack Android Java Interface.
+
+HTTrack Website Copier, Offline Browser for Windows and Unix
+Copyright (C) Xavier Roche and other contributors
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 3
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ */
+
+package com.httrack.android;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
+
+/**
+ * Value helpers for the option mappers; pure, Android-free, so the mappers
+ * that use them stay reachable from unit tests.
+ */
+public final class OptionValues {
+  private OptionValues() {
+  }
+
+  private static final Pattern patternDigits = Pattern.compile("^[0-9]+$");
+
+  private static final Pattern patternDecimal = Pattern
+      .compile("^[0-9]+(\\.[0-9]+)?$");
+
+  private static final Pattern patternPositive = Pattern
+      .compile("^0*[1-9][0-9]*$");
+
+  /**
+   * True if the value is a non-empty run of ASCII digits.
+   *
+   * @param value
+   *          The value, possibly null
+   * @return true if the value is pure digits
+   */
+  public static boolean isDigits(final String value) {
+    return value != null && patternDigits.matcher(value).matches();
+  }
+
+  /**
+   * True if the value is a non-negative integer or decimal.
+   *
+   * @param value
+   *          The value, possibly null
+   * @return true if the value is a non-negative decimal
+   */
+  public static boolean isDecimal(final String value) {
+    return value != null && patternDecimal.matcher(value).matches();
+  }
+
+  /**
+   * True if the value is a positive integer within int64_t range. The engine
+   * panics on a digit run too long to hold, as it does on a zero.
+   *
+   * @param value
+   *          The value, possibly null
+   * @return true if the value is a positive integer within int64_t range
+   */
+  public static boolean isPositive(final String value) {
+    if (value == null || !patternPositive.matcher(value).matches()) {
+      return false;
+    }
+    try {
+      Long.parseLong(value);
+    } catch (final NumberFormatException nfe) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * True if the value is a digit run no greater than max. A run too long to hold
+   * is over max, not an error worth reporting.
+   *
+   * @param value
+   *          The value, possibly null
+   * @param max
+   *          Highest value to accept
+   * @return true if the value is digits no greater than max
+   */
+  public static boolean isAtMost(final String value, final long max) {
+    if (!isDigits(value)) {
+      return false;
+    }
+    try {
+      return Long.parseLong(value) <= max;
+    } catch (final NumberFormatException nfe) {
+      return false;
+    }
+  }
+
+  /** Lowest non-zero rate the engine takes for -%c, and the highest. */
+  private static final String MIN_RATE = "0.000001";
+
+  private static final String MAX_RATE = new BigDecimal(Float.MAX_VALUE)
+      .toPlainString();
+
+  /**
+   * The rate brought inside the range the engine accepts. The engine panics on
+   * a rate between zero and 0.000001 or above a float, and a zero means no
+   * limit, so it stays.
+   *
+   * @param value
+   *          A value isDecimal accepted
+   * @return the value, or the nearest rate the engine takes
+   */
+  public static String clampRate(final String value) {
+    final double rate = Double.parseDouble(value);
+    if (rate > 0 && rate < Double.parseDouble(MIN_RATE)) {
+      return MIN_RATE;
+    }
+    return rate > Float.MAX_VALUE ? MAX_RATE : value;
+  }
+
+  /**
+   * True if the value is at most max bytes of UTF-8. An engine buffer is a byte
+   * count, so a limit measured in characters lets a non-ASCII value through.
+   *
+   * @param value
+   *          The value, possibly null
+   * @param max
+   *          Highest byte count to accept
+   * @return true if the value fits
+   */
+  public static boolean fitsBytes(final String value, final int max) {
+    return value != null
+        && value.getBytes(StandardCharsets.UTF_8).length <= max;
+  }
+
+  /**
+   * True if the value holds a control character. The engine turns CR, LF and TAB in any
+   * argument into spaces, so such a value reaches the server altered rather than refused.
+   *
+   * @param value
+   *          The value, possibly null
+   * @return true if any character is below a space, or is DEL
+   */
+  public static boolean hasControlCharacter(final String value) {
+    if (value == null) {
+      return false;
+    }
+    for (int i = 0; i < value.length(); i++) {
+      final char c = value.charAt(i);
+      if (c < ' ' || c == '\u007f') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Parse an integer.
+   *
+   * @param value
+   *          The integer value
+   * @param defaultValue
+   *          Default value on error or out-of-range
+   * @return The parsed value, or defaultValue on error
+   */
+  public static int parseInt(final String value, final int defaultValue) {
+    try {
+      return Integer.parseInt(value);
+    } catch (final NumberFormatException nfe) {
+      return defaultValue;
+    }
+  }
+
+}

@@ -1,0 +1,2504 @@
+/*
+HTTrack Android Java Interface.
+
+HTTrack Website Copier, Offline Browser for Windows and Unix
+Copyright (C) Xavier Roche and other contributors
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 3
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ */
+
+package com.httrack.android;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.Parcelable;
+import android.util.Log;
+import android.util.Pair;
+import android.util.SparseArray;
+
+/**
+ * Options mapper, storing and managing options, and mapping GUI fields from/to
+ * them.
+ */
+public class OptionsMapper {
+  protected static final String PREFS_NAME = "HTTrackDefaultSettings";
+  protected static final String BASE_NAME = "BasePath";
+
+  /** Mirrors HTS_MAX_RETRY_AFTER_LIMIT, the ceiling the engine clips to. */
+  protected static final int MAX_RETRY_AFTER_LIMIT = 3600;
+
+  /** The engine refuses a longer Accept value, and the whole command line with it. */
+  protected static final int MAX_ACCEPT_BYTES = 255;
+
+  /** The engine refuses -u above this, so the radio's range is now a hard limit. */
+  protected static final int MAX_CHECK_TYPE = 2;
+
+  /** Mirrors HTS_ROBOTS_ALWAYS_STRICT, the highest -s the engine accepts. */
+  protected static final int MAX_ROBOTS = 3;
+
+  /** Serialization key of the cache checkbox, which CachePolicy gates on the action. */
+  static final String CACHE_KEY = "Cache";
+
+  // Fields used in serialization
+  // note: names tend to match the Windows winprofile.ini version
+  @SuppressWarnings("unchecked")
+  protected static final Pair<Integer, String> fieldsSerializer[] = new Pair[] {
+      /* Global settings */
+      new Pair<Integer, String>(R.id.fieldProjectName, "ProjectName"),
+      new Pair<Integer, String>(R.id.fieldProjectCategory, "Category"),
+
+      /* URL. CurrentAction emits before the URL on purpose: the engine counts
+         URLs positionally, and its -iC* must land ahead of the first one. */
+      new Pair<Integer, String>(R.id.radioAction, "CurrentAction"), /* FIXME */
+      new Pair<Integer, String>(R.id.fieldWebsiteURLs, "CurrentUrl"),
+
+      /* Scan Rules */
+      new Pair<Integer, String>(R.id.editRules, "WildCardFilters"),
+
+      /* Limits */
+      new Pair<Integer, String>(R.id.editMaxDepth, "Depth"),
+      new Pair<Integer, String>(R.id.editMaxExtDepth, "ExtDepth"),
+      new Pair<Integer, String>(R.id.editMaxSizeHtml, "MaxHtml"),
+      new Pair<Integer, String>(R.id.editMaxSizeOther, "MaxOther"),
+      new Pair<Integer, String>(R.id.editSiteSizeLimit, "MaxAll"),
+      new Pair<Integer, String>(R.id.editMaxTimeOverall, "MaxTime"),
+      new Pair<Integer, String>(R.id.editMaxTransferRate, "MaxRate"),
+      new Pair<Integer, String>(R.id.editMaxConnectionsSecond, "MaxConn"),
+      new Pair<Integer, String>(R.id.editMaxNumberLinks, "MaxLinks"),
+
+      /* Flow control */
+      new Pair<Integer, String>(R.id.editNumberOfConnections, "Sockets"),
+      new Pair<Integer, String>(R.id.checkPersistentConnections, "KeepAlive"),
+      new Pair<Integer, String>(R.id.editTimeout, "TimeOut"),
+      new Pair<Integer, String>(R.id.checkRemoveHostIfTimeout, "RemoveTimeout"),
+      new Pair<Integer, String>(R.id.editRetries, "Retry"),
+      new Pair<Integer, String>(R.id.editMaxRetryAfter, "MaxRetryAfter"),
+      new Pair<Integer, String>(R.id.editMinTransferRate, "RateOut"),
+      new Pair<Integer, String>(R.id.checkRemoveHostIfSlow, "RemoveRateout"),
+      new Pair<Integer, String>(R.id.editPause, "PauseFiles"),
+
+      /* Links */
+      new Pair<Integer, String>(R.id.checkDetectAllLinks, "ParseAll"),
+      new Pair<Integer, String>(R.id.checkGetNonHtmlNear, "Near"),
+      new Pair<Integer, String>(R.id.checkTestAllLinks, "Test"),
+      new Pair<Integer, String>(R.id.checkGetHtmlFirst, "HTMLFirst"),
+      new Pair<Integer, String>(R.id.checkKeepWwwPrefix, "KeepWww"),
+      new Pair<Integer, String>(R.id.checkKeepDoubleSlashes, "KeepSlashes"),
+      new Pair<Integer, String>(R.id.checkKeepQueryOrder, "KeepQueryOrder"),
+
+      /* Build */
+      new Pair<Integer, String>(R.id.checkDosNames, "Dos"),
+      new Pair<Integer, String>(R.id.checkIso9660, "Iso9660"),
+      new Pair<Integer, String>(R.id.checkNoErrorPages, "NoErrorPages"),
+      new Pair<Integer, String>(R.id.checkNoExternalPages, "NoExternalPages"),
+      new Pair<Integer, String>(R.id.checkHidePasswords, "NoPwdInPages"),
+      new Pair<Integer, String>(R.id.checkHideQueryStrings, "NoQueryStrings"),
+      new Pair<Integer, String>(R.id.checkDoNotPurge, "NoPurgeOldFiles"),
+      new Pair<Integer, String>(R.id.checkSingleFile, "SingleFile"),
+      new Pair<Integer, String>(R.id.editSingleFileMaxSize,
+          "SingleFileMaxSize"),
+      new Pair<Integer, String>(R.id.checkWarc, "Warc"),
+      new Pair<Integer, String>(R.id.editWarcFile, "WarcFile"),
+      new Pair<Integer, String>(R.id.radioBuild, "Build"),
+      new Pair<Integer, String>(R.id.editCustomBuild, "BuildString"),
+
+      /* Browser ID */
+      new Pair<Integer, String>(R.id.editBrowserIdentity, "UserID"),
+      new Pair<Integer, String>(R.id.editHtmlFooter, "Footer"),
+      new Pair<Integer, String>(R.id.editAcceptLanguage, "AcceptLanguage"),
+      new Pair<Integer, String>(R.id.editOtherHeaders, "OtherHeaders"),
+      new Pair<Integer, String>(R.id.editDefaultReferer, "DefaultReferer"),
+
+      /* Accept headers, one row per kind of link plus the default. */
+      new Pair<Integer, String>(R.id.editAcceptDefault, "AcceptDefault"),
+      new Pair<Integer, String>(R.id.editAcceptDocument, "AcceptDocument"),
+      new Pair<Integer, String>(R.id.editAcceptIframe, "AcceptIframe"),
+      new Pair<Integer, String>(R.id.editAcceptFrame, "AcceptFrame"),
+      new Pair<Integer, String>(R.id.editAcceptImage, "AcceptImage"),
+      new Pair<Integer, String>(R.id.editAcceptStyle, "AcceptStyle"),
+      new Pair<Integer, String>(R.id.editAcceptScript, "AcceptScript"),
+      new Pair<Integer, String>(R.id.editAcceptFont, "AcceptFont"),
+      new Pair<Integer, String>(R.id.editAcceptAudio, "AcceptAudio"),
+      new Pair<Integer, String>(R.id.editAcceptVideo, "AcceptVideo"),
+      new Pair<Integer, String>(R.id.editAcceptObject, "AcceptObject"),
+      new Pair<Integer, String>(R.id.editAcceptEmbed, "AcceptEmbed"),
+
+      /* Spider */
+      new Pair<Integer, String>(R.id.checkAcceptCookies, "Cookies"),
+      new Pair<Integer, String>(R.id.editCookiesFile, "CookiesFile"),
+      new Pair<Integer, String>(R.id.radioCheckDocumentType, "CheckType"),
+      new Pair<Integer, String>(R.id.checkParseJavaFiles, "ParseJava"),
+      new Pair<Integer, String>(R.id.radioSpider, "FollowRobotsTxt"),
+      new Pair<Integer, String>(R.id.checkSitemap, "Sitemap"),
+      new Pair<Integer, String>(R.id.editSitemapUrl, "SitemapUrl"),
+      new Pair<Integer, String>(R.id.checkUpdateHacks, "UpdateHack"),
+      new Pair<Integer, String>(R.id.checkUrlHacks, "URLHack"),
+      new Pair<Integer, String>(R.id.checkTolerentRequests, "TolerantRequests"),
+      new Pair<Integer, String>(R.id.checkForceHttp10, "HTTP10"),
+
+      /* Proxy */
+      new Pair<Integer, String>(R.id.radioProxyProtocol, "ProxyType"),
+      new Pair<Integer, String>(R.id.editProxy, "Proxy"),
+      new Pair<Integer, String>(R.id.editProxyPort, "Port"),
+      new Pair<Integer, String>(R.id.checkUseProxyForFtp, "UseHTTPProxyForFTP"),
+
+      /* Log, Index, Cache */
+      new Pair<Integer, String>(R.id.checkStoreAllFilesInCache,
+          "StoreAllInCache"),
+      new Pair<Integer, String>(R.id.checkDoNotRedownloadLocallErasedFiles,
+          "NoRecatch"),
+      new Pair<Integer, String>(R.id.checkChanges, "Changes"),
+      new Pair<Integer, String>(R.id.checkCreateLogFiles, "Log"),
+      /* FIXME with Log */
+      new Pair<Integer, String>(R.id.radioVerbosity, "LogType"),
+      new Pair<Integer, String>(R.id.checkUseIndex, "Index"),
+      new Pair<Integer, String>(R.id.checkUseWordIndex, "WordIndex"),
+      new Pair<Integer, String>(R.id.checkUseMailIndex, "MailIndex"),
+
+      /*
+       * Type/MIME associations (lame mapping, but compatible with the
+       * WinHTTrack one)
+       */
+      new Pair<Integer, String>(R.id.editExtDef1, "MIMEDefsExt1"),
+      new Pair<Integer, String>(R.id.editMimeDef1, "MIMEDefsMime1"),
+      new Pair<Integer, String>(R.id.editExtDef2, "MIMEDefsExt2"),
+      new Pair<Integer, String>(R.id.editMimeDef2, "MIMEDefsMime2"),
+      new Pair<Integer, String>(R.id.editExtDef3, "MIMEDefsExt3"),
+      new Pair<Integer, String>(R.id.editMimeDef3, "MIMEDefsMime3"),
+      new Pair<Integer, String>(R.id.editExtDef4, "MIMEDefsExt4"),
+      new Pair<Integer, String>(R.id.editMimeDef4, "MIMEDefsMime4"),
+      new Pair<Integer, String>(R.id.editExtDef5, "MIMEDefsExt5"),
+      new Pair<Integer, String>(R.id.editMimeDef5, "MIMEDefsMime5"),
+      new Pair<Integer, String>(R.id.editExtDef6, "MIMEDefsExt6"),
+      new Pair<Integer, String>(R.id.editMimeDef6, "MIMEDefsMime6"),
+      new Pair<Integer, String>(R.id.editExtDef7, "MIMEDefsExt7"),
+      new Pair<Integer, String>(R.id.editMimeDef7, "MIMEDefsMime7"),
+      new Pair<Integer, String>(R.id.editExtDef8, "MIMEDefsExt8"),
+      new Pair<Integer, String>(R.id.editMimeDef8, "MIMEDefsMime8"),
+
+      /* Experts Only */
+      new Pair<Integer, String>(R.id.checkUseCacheForUpdates, "Cache"),
+      new Pair<Integer, String>(R.id.radioPrimaryScanRule, "PrimaryScan"),
+      new Pair<Integer, String>(R.id.radioTravelMode, "Travel"),
+      new Pair<Integer, String>(R.id.radioGlobalTravelMode, "GlobalTravel"),
+      new Pair<Integer, String>(R.id.radioRewriteLinks, "RewriteLinks"),
+      new Pair<Integer, String>(R.id.editStripQuery, "StripQuery"),
+      new Pair<Integer, String>(R.id.editHostAlias, "HostAlias"),
+      new Pair<Integer, String>(R.id.checkActivateDebugging, "Debugging"), /* FIXME */
+
+  };
+
+  // Default fields for empty profile
+  @SuppressWarnings("unchecked")
+  protected static final Pair<String, String> fieldsDefaults[] = new Pair[] {
+      new Pair<String, String>("Near", "0"),
+      new Pair<String, String>("Test", "0"),
+      new Pair<String, String>("ParseAll", "1"),
+      new Pair<String, String>("HTMLFirst", "0"),
+      new Pair<String, String>("Cache", "1"),
+      new Pair<String, String>("NoRecatch", "0"),
+      new Pair<String, String>("Dos", "0"),
+      new Pair<String, String>("Iso9660", "0"),
+      new Pair<String, String>("Index", "1"),
+      new Pair<String, String>("WordIndex", "0"),
+      new Pair<String, String>("MailIndex", "0"),
+      new Pair<String, String>("Log", "1"),
+      new Pair<String, String>("RemoveTimeout", "0"),
+      new Pair<String, String>("RemoveRateout", "0"),
+      new Pair<String, String>("KeepAlive", "1"),
+      new Pair<String, String>("FollowRobotsTxt", "2"),
+      new Pair<String, String>("NoErrorPages", "0"),
+      new Pair<String, String>("NoExternalPages", "0"),
+      new Pair<String, String>("NoPwdInPages", "0"),
+      new Pair<String, String>("NoQueryStrings", "0"),
+      new Pair<String, String>("NoPurgeOldFiles", "0"),
+      new Pair<String, String>("Warc", "0"),
+      new Pair<String, String>("Sitemap", "0"),
+      new Pair<String, String>("SingleFile", "0"),
+      new Pair<String, String>("Changes", "0"),
+      new Pair<String, String>("Cookies", "1"),
+      new Pair<String, String>("CheckType", "1"),
+      new Pair<String, String>("ParseJava", "1"),
+      new Pair<String, String>("HTTP10", "0"),
+      new Pair<String, String>("TolerantRequests", "0"),
+      new Pair<String, String>("UpdateHack", "1"),
+      new Pair<String, String>("URLHack", "1"),
+      new Pair<String, String>("StoreAllInCache", "0"),
+      new Pair<String, String>("LogType", "0"),
+      new Pair<String, String>("UseHTTPProxyForFTP", "1"),
+      new Pair<String, String>("Build", "0"),
+      new Pair<String, String>("PrimaryScan", "3"),
+      new Pair<String, String>("Travel", "1"),
+      new Pair<String, String>("GlobalTravel", "0"),
+      new Pair<String, String>("RewriteLinks", "0"),
+      new Pair<String, String>("BuildString", "%h%p/%n%q.%t"),
+      // Empty: no -F, so the engine supplies its own current versioned User-Agent.
+      new Pair<String, String>("UserID", ""),
+      new Pair<String, String>("ProxyType", "0"),
+      new Pair<String, String>("KeepWww", "0"),
+      new Pair<String, String>("KeepSlashes", "0"),
+      new Pair<String, String>("KeepQueryOrder", "0"),
+      /* A single %s anywhere puts the whole template back on the engine's
+       * legacy positional path, where named fields render verbatim. */
+      new Pair<String, String>("Footer",
+          "<!-- Mirrored from {url} by HTTrack Website Copier/3.x [XR&CO], {date} -->"),
+      new Pair<String, String>("AcceptLanguage", "en,*"),
+      new Pair<String, String>("OtherHeaders", ""),
+      new Pair<String, String>("DefaultReferer", ""),
+      new Pair<String, String>(
+          "WildCardFilters",
+          "+*.png +*.gif +*.jpg +*.jpeg +*.webp +*.avif +*.svg +*.css +*.js +*.woff2 +*.woff +*.ttf +*.otf +*.mp4 +*.webm -ad.doubleclick.net/* -mime:application/foobar"),
+  // new Pair<String, String>("CurrentAction", "0")
+  };
+
+  // Special options to be handled/merged differently
+  protected final MaxSizeHandler maxSizeHandler = new MaxSizeHandler();
+  protected final HostControlHandler hostControlHandler = new HostControlHandler();
+  protected final DosIso9660Handler dosIso9660Handler = new DosIso9660Handler();
+  protected final BuildHandler buildHandler = new BuildHandler();
+  protected final ProxyHandler proxyHandler = new ProxyHandler();
+  protected final LogHandler logHandler = new LogHandler();
+  protected final GatedFeatureHandler warcHandler = new GatedFeatureHandler(
+      "%r", "--warc-file");
+  protected final GatedFeatureHandler sitemapHandler = new GatedFeatureHandler(
+      "%m", "--sitemap-url");
+  protected final GatedFeatureHandler singleFileHandler =
+      new GatedFeatureHandler("%Z", new NumberArgumentOption(
+          "--single-file-max-size"));
+  protected final PrimaryScanHandler primaryScanHandler = new PrimaryScanHandler();
+  protected final MimeTypesHandler[] mimeTypesHandlers = new MimeTypesHandler[] {
+      new MimeTypesHandler(), new MimeTypesHandler(), new MimeTypesHandler(),
+      new MimeTypesHandler(), new MimeTypesHandler(), new MimeTypesHandler(),
+      new MimeTypesHandler(), new MimeTypesHandler() };
+
+  // Fields mapper to httrack engine options
+  @SuppressWarnings("unchecked")
+  protected final Pair<String, OptionMapper> fieldsMapper[] = new Pair[] {
+      new Pair<String, OptionMapper>("ProjectName", NoOpOption.INSTANCE),
+      new Pair<String, OptionMapper>("Category", NoOpOption.INSTANCE),
+      new Pair<String, OptionMapper>("CurrentUrl", UrlSplit.INSTANCE),
+      new Pair<String, OptionMapper>("CurrentAction",
+          MultipleChoicesOption.ACTION),
+      new Pair<String, OptionMapper>("WildCardFilters", StringSplit.INSTANCE),
+      new Pair<String, OptionMapper>("Depth",
+          new CappedOption("r", Integer.MAX_VALUE - 1)),
+      new Pair<String, OptionMapper>("ExtDepth", new SimpleOption("%e")),
+      new Pair<String, OptionMapper>("MaxHtml", maxSizeHandler.getHtml()),
+      new Pair<String, OptionMapper>("MaxOther", maxSizeHandler.getNonHtml()),
+      new Pair<String, OptionMapper>("MaxAll",
+          new CappedOption("M", Long.MAX_VALUE)),
+      new Pair<String, OptionMapper>("MaxTime", new SimpleOption("E")),
+      new Pair<String, OptionMapper>("MaxRate", new SimpleOption("A")),
+      /* the only option the engine scans with %f, so the only one taking a
+         fraction: -%e carries a '%' too but is scanned with %d */
+      new Pair<String, OptionMapper>("MaxConn", new SimpleOption("%c", true)),
+      new Pair<String, OptionMapper>("MaxLinks", new SimpleOption("#L")),
+      new Pair<String, OptionMapper>("Sockets", new SimpleOption("c")),
+      /* keep-alive is -%k; the bare -k is StoreAllInCache. */
+      new Pair<String, OptionMapper>("KeepAlive", new SimpleOption0("%k")),
+      new Pair<String, OptionMapper>("TimeOut", new SimpleOption("T")),
+      new Pair<String, OptionMapper>("RemoveTimeout",
+          hostControlHandler.getTimeMapper()),
+      new Pair<String, OptionMapper>("RemoveRateout",
+          hostControlHandler.getRateMapper()),
+      new Pair<String, OptionMapper>("Retry", new SimpleOption("R")),
+      new Pair<String, OptionMapper>("MaxRetryAfter",
+          new ClampedOption("%J", MAX_RETRY_AFTER_LIMIT)),
+      new Pair<String, OptionMapper>("RateOut", new SimpleOption("J")),
+      new Pair<String, OptionMapper>("ParseAll", new SimpleOption0("%P")),
+      new Pair<String, OptionMapper>("Near", new SimpleOptionFlag("n")),
+      new Pair<String, OptionMapper>("Test", new SimpleOptionFlag("t")),
+      new Pair<String, OptionMapper>("HTMLFirst",
+          primaryScanHandler.getHtmlFirstMapper()),
+      new Pair<String, OptionMapper>("Dos", dosIso9660Handler.getDosMapper()),
+      new Pair<String, OptionMapper>("Iso9660",
+          dosIso9660Handler.getIso9660Mapper()),
+      new Pair<String, OptionMapper>("NoErrorPages", new SimpleOptionFlag("o0")),
+      new Pair<String, OptionMapper>("NoExternalPages", new SimpleOptionFlag(
+          "x")),
+      new Pair<String, OptionMapper>("NoPwdInPages", new SimpleOptionFlag("%x")),
+      new Pair<String, OptionMapper>("NoQueryStrings", new SimpleOptionFlag(
+          "%q0")),
+      new Pair<String, OptionMapper>("NoPurgeOldFiles", new SimpleOptionFlag(
+          "X0")),
+      new Pair<String, OptionMapper>("Warc", warcHandler.getToggleMapper()),
+      new Pair<String, OptionMapper>("WarcFile", warcHandler.getValueMapper()),
+      new Pair<String, OptionMapper>("Sitemap",
+          sitemapHandler.getToggleMapper()),
+      new Pair<String, OptionMapper>("SitemapUrl",
+          sitemapHandler.getValueMapper()),
+      new Pair<String, OptionMapper>("SingleFile",
+          singleFileHandler.getToggleMapper()),
+      new Pair<String, OptionMapper>("SingleFileMaxSize",
+          singleFileHandler.getValueMapper()),
+      new Pair<String, OptionMapper>("Changes", new SimpleOptionFlag("%d")),
+      new Pair<String, OptionMapper>("Build", buildHandler.getTypeMapper()),
+      new Pair<String, OptionMapper>("BuildString",
+          buildHandler.getCustomMapper()),
+      new Pair<String, OptionMapper>("UserID", new ArgumentOption("-F")),
+      new Pair<String, OptionMapper>("Footer", new ArgumentOption("-%F")),
+      new Pair<String, OptionMapper>("AcceptLanguage",
+          new ArgumentOption("-%l")),
+      new Pair<String, OptionMapper>("AcceptDefault",
+          new AcceptOption(AcceptPresets.NO_KIND)),
+      new Pair<String, OptionMapper>("AcceptDocument",
+          new AcceptOption("document")),
+      new Pair<String, OptionMapper>("AcceptIframe",
+          new AcceptOption("iframe")),
+      new Pair<String, OptionMapper>("AcceptFrame",
+          new AcceptOption("frame")),
+      new Pair<String, OptionMapper>("AcceptImage",
+          new AcceptOption("image")),
+      new Pair<String, OptionMapper>("AcceptStyle",
+          new AcceptOption("style")),
+      new Pair<String, OptionMapper>("AcceptScript",
+          new AcceptOption("script")),
+      new Pair<String, OptionMapper>("AcceptFont",
+          new AcceptOption("font")),
+      new Pair<String, OptionMapper>("AcceptAudio",
+          new AcceptOption("audio")),
+      new Pair<String, OptionMapper>("AcceptVideo",
+          new AcceptOption("video")),
+      new Pair<String, OptionMapper>("AcceptObject",
+          new AcceptOption("object")),
+      new Pair<String, OptionMapper>("AcceptEmbed",
+          new AcceptOption("embed")),
+      new Pair<String, OptionMapper>("OtherHeaders", new LineListOption("-%X")),
+      new Pair<String, OptionMapper>("DefaultReferer",
+          new ArgumentOption("-%R")),
+      new Pair<String, OptionMapper>("Cookies",
+          new SimpleOptionFlag("b0", true)),
+      new Pair<String, OptionMapper>("CheckType",
+          new CappedOption("u", MAX_CHECK_TYPE)),
+      /* Bare -j only re-asserts the engine default; switching it off needs -j0. */
+      new Pair<String, OptionMapper>("ParseJava", new SimpleOptionFlag("j0",
+          true)),
+      new Pair<String, OptionMapper>("FollowRobotsTxt",
+          new CappedOption("s", MAX_ROBOTS)),
+      new Pair<String, OptionMapper>("UpdateHack", new SimpleOptionFlag("%s")),
+      new Pair<String, OptionMapper>("URLHack", new SimpleOption0("%u")),
+      new Pair<String, OptionMapper>("TolerantRequests", new SimpleOptionFlag(
+          "%B")),
+      new Pair<String, OptionMapper>("HTTP10", new SimpleOptionFlag("%h")),
+      new Pair<String, OptionMapper>("ProxyType",
+          proxyHandler.getProtocolMapper()),
+      new Pair<String, OptionMapper>("Proxy", proxyHandler.getAddressMapper()),
+      new Pair<String, OptionMapper>("Port", proxyHandler.getPortMapper()),
+      new Pair<String, OptionMapper>("CookiesFile", new ArgumentOption("-%K")),
+      new Pair<String, OptionMapper>("PauseFiles", new ArgumentOption("-%G")),
+      new Pair<String, OptionMapper>("StripQuery", new ArgumentOption("-%g")),
+      new Pair<String, OptionMapper>("HostAlias", new RuleListOption(
+          "--host-alias")),
+      new Pair<String, OptionMapper>("KeepWww", new SimpleOptionFlag("%j")),
+      new Pair<String, OptionMapper>("KeepSlashes", new SimpleOptionFlag(
+          "%o")),
+      new Pair<String, OptionMapper>("KeepQueryOrder", new SimpleOptionFlag("%y")),
+      new Pair<String, OptionMapper>("UseHTTPProxyForFTP", new SimpleOption0(
+          "%f")),
+      new Pair<String, OptionMapper>("StoreAllInCache", new SimpleOptionFlag(
+          "k")),
+      new Pair<String, OptionMapper>("NoRecatch", new SimpleOptionFlag("%n")),
+      new Pair<String, OptionMapper>("Log", logHandler.getEnabledMapper()),
+      new Pair<String, OptionMapper>("LogType", logHandler.getTypeMapper()),
+      new Pair<String, OptionMapper>("Index", new SimpleOptionFlag("I0", true)),
+      new Pair<String, OptionMapper>("WordIndex", new SimpleOptionFlag("%I")),
+      new Pair<String, OptionMapper>("MailIndex", new SimpleOptionFlag("%M")),
+      /* Ticked emits nothing, and buildCommandline() drops the unticked -C0
+         when the action is Continue. See CachePolicy. */
+      new Pair<String, OptionMapper>(CACHE_KEY,
+          new SimpleOptionFlag("C0", true)),
+      new Pair<String, OptionMapper>("PrimaryScan",
+          primaryScanHandler.getTypeMapper()),
+      new Pair<String, OptionMapper>("Travel", MultipleChoicesOption.TRAVEL),
+      new Pair<String, OptionMapper>("GlobalTravel",
+          MultipleChoicesOption.GLOBAL_TRAVEL),
+      new Pair<String, OptionMapper>("RewriteLinks",
+          MultipleChoicesOption.REWRITE_LINKS),
+      new Pair<String, OptionMapper>("Debugging", new SimpleOptionFlag("%H")),
+      new Pair<String, OptionMapper>("MIMEDefsExt1",
+          mimeTypesHandlers[0].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime1",
+          mimeTypesHandlers[0].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt2",
+          mimeTypesHandlers[1].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime2",
+          mimeTypesHandlers[1].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt3",
+          mimeTypesHandlers[2].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime3",
+          mimeTypesHandlers[2].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt4",
+          mimeTypesHandlers[3].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime4",
+          mimeTypesHandlers[3].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt5",
+          mimeTypesHandlers[4].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime5",
+          mimeTypesHandlers[4].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt6",
+          mimeTypesHandlers[5].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime6",
+          mimeTypesHandlers[5].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt7",
+          mimeTypesHandlers[6].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime7",
+          mimeTypesHandlers[6].getMimeMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsExt8",
+          mimeTypesHandlers[7].getExtMapper()),
+      new Pair<String, OptionMapper>("MIMEDefsMime8",
+          mimeTypesHandlers[7].getMimeMapper()) };
+
+  /**
+   * What a winprofile.ini key means, kept out of the tables above so tests can
+   * reach it: the stub android.jar nulls Pair's fields and throws on
+   * SparseArray.
+   */
+  public static class ProfileFormat {
+    // Spellings earlier builds wrote; accepted on read, never written back.
+    private static final String LEGACY_NAMES[][] = {
+        { "ProxyProtocol", "ProxyType" }, { "KeepWwwPrefix", "KeepWww" },
+        { "KeepDoubleSlashes", "KeepSlashes" }, { "Pause", "PauseFiles" } };
+
+    // WinHTTrack packs both name-mangling boxes in Dos; Iso9660 is ours alone.
+    static final String DOS_KEY = "Dos";
+    static final String ISO9660_KEY = "Iso9660";
+
+    /** Current spelling of KEY, which is KEY itself unless it was renamed. */
+    static String canonicalName(final String key) {
+      for (final String[] legacy : LEGACY_NAMES) {
+        if (legacy[0].equals(key)) {
+          return legacy[1];
+        }
+      }
+      return key;
+    }
+
+    /** Spelling an earlier build used for KEY, or null if it never changed. */
+    static String legacyName(final String key) {
+      for (final String[] legacy : LEGACY_NAMES) {
+        if (legacy[1].equals(key)) {
+          return legacy[0];
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Pack both name-mangling boxes as WinHTTrack does: bit 0 is Dos, bit 1 is
+     * Iso9660, each "1" when checked.
+     *
+     * @return the packed value
+     */
+    static String pack(final String dos, final String iso9660) {
+      return String.valueOf(("1".equals(dos) ? 1 : 0)
+          | ("1".equals(iso9660) ? 2 : 0));
+    }
+
+    /*
+     * Split a packed value, or null when it holds no number.
+     */
+    private static String[] unpack(final String packed) {
+      if (packed == null) {
+        return null;
+      }
+      final int bits;
+      try {
+        bits = Integer.parseInt(packed.trim());
+      } catch (final NumberFormatException nfe) {
+        return null;
+      }
+      return new String[] { (bits & 1) != 0 ? "1" : "0",
+          (bits & 2) != 0 ? "1" : "0" };
+    }
+
+    /**
+     * Settings the raw key/value pairs of a profile stand for, under their
+     * current names.
+     *
+     * @param raw
+     *          exactly what the file held, so an absent key stays absent
+     * @return the settings, with the Dos bitmask split into its two boxes
+     */
+    static Map<String, String> resolve(final Map<String, String> raw) {
+      final Map<String, String> values = new LinkedHashMap<String, String>();
+      for (final Map.Entry<String, String> entry : raw.entrySet()) {
+        values.put(canonicalName(entry.getKey()), entry.getValue());
+      }
+      // An explicit Iso9660 wins: older profiles wrote Dos as a plain boolean
+      // beside it.
+      if (raw.containsKey(DOS_KEY) && !raw.containsKey(ISO9660_KEY)) {
+        final String[] boxes = unpack(values.get(DOS_KEY));
+        if (boxes != null) {
+          values.put(DOS_KEY, boxes[0]);
+          values.put(ISO9660_KEY, boxes[1]);
+        }
+      }
+      return values;
+    }
+
+    /**
+     * Inverse of {@link #resolve}: what the file holds for these settings.
+     *
+     * @return the pairs to write, Iso9660 folded into Dos and so absent
+     */
+    static Map<String, String> toFile(final Map<String, String> values) {
+      final Map<String, String> file = new LinkedHashMap<String, String>(values);
+      file.put(DOS_KEY, pack(values.get(DOS_KEY), values.get(ISO9660_KEY)));
+      file.remove(ISO9660_KEY);
+      return file;
+    }
+
+    /* The four tables below are winprofile-keys.tsv columns for the keys we
+       write. */
+
+    // default_state=derived: every front end computes its own value.
+    static final String DERIVED[] = { "AcceptLanguage", "UserID" };
+
+    // default_state=none: no reader substitutes anything for an absent key.
+    static final String NO_DEFAULT[] = { "Debugging", "Iso9660", "MaxRate",
+        "ProjectName", "Sockets", "WarcFile" };
+
+    // empty_means=literal: a reader takes an empty value at face value instead
+    // of falling back, so a cleared field still has to be stated.
+    static final String EMPTY_IS_LITERAL[] = { "AcceptLanguage", "BuildString",
+        "Footer", "UserID", "WildCardFilters" };
+
+    // Shared defaults that are not ours: our action radio seeds no value.
+    // A String[][] and not a Pair[]: the stub android.jar nulls Pair's fields.
+    static final String SHARED_DEFAULTS[][] = { { "CurrentAction", "0" } };
+
+    private static boolean holds(final String set[], final String key) {
+      for (final String entry : set) {
+        if (entry.equals(key)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    private static String text(final String value) {
+      return value != null ? value : "";
+    }
+
+    /**
+     * Whether leaving KEY out says the same thing as writing BASELINE for it.
+     *
+     * @param baseline
+     *          the value a freshly reset profile holds
+     * @param ourDefault
+     *          the value we substitute for an absent key
+     * @return true when every reader rebuilds BASELINE from nothing
+     */
+    static boolean absentMeansSame(final String key, final String baseline,
+        final String ourDefault) {
+      final String value = text(baseline);
+      if (value.length() == 0 && holds(EMPTY_IS_LITERAL, key)) {
+        return false;
+      }
+      if (holds(DERIVED, key)) {
+        return true;
+      }
+      if (holds(NO_DEFAULT, key)) {
+        return value.length() == 0;
+      }
+      for (final String[] shared : SHARED_DEFAULTS) {
+        if (shared[0].equals(key)) {
+          return shared[1].equals(value);
+        }
+      }
+      return text(ourDefault).equals(value);
+    }
+
+    /**
+     * The subset of {@link #toFile(Map)} a save has to state: what the file
+     * already carries, what differs from a freshly reset profile, and what
+     * another front end would not put back on its own.
+     *
+     * @param values
+     *          the settings to save
+     * @param baseline
+     *          the settings a freshly reset profile holds
+     * @param defaults
+     *          what we substitute for an absent key, by key
+     * @param present
+     *          the keys the file already states
+     * @return the pairs to write
+     */
+    static Map<String, String> toFile(final Map<String, String> values,
+        final Map<String, String> baseline, final Map<String, String> defaults,
+        final Set<String> present) {
+      final Map<String, String> file = toFile(values);
+      final Map<String, String> was = toFile(baseline);
+      final Map<String, String> stated = new LinkedHashMap<String, String>();
+      for (final Map.Entry<String, String> entry : file.entrySet()) {
+        final String key = entry.getKey();
+        final String seeded = was.get(key);
+        if (present.contains(key)
+            || !text(entry.getValue()).equals(text(seeded))
+            || !absentMeansSame(key, seeded, defaults.get(key))) {
+          stated.put(key, entry.getValue());
+        }
+      }
+      return stated;
+    }
+
+    /**
+     * Reads a profile's stated pairs, values still encoded.
+     *
+     * @param profile
+     *          The profile file (winprofile.ini), null when the project name
+     *          was refused as a path
+     * @return the pairs, in file order
+     * @throws IOException
+     *           When there is no profile to read, or upon I/O error.
+     */
+    static Map<String, String> rawFields(final File profile)
+        throws IOException {
+      if (profile == null || !profile.exists()) {
+        throw new IOException("no such profile");
+      }
+      final Map<String, String> raw = new LinkedHashMap<String, String>();
+      final BufferedReader reader = new BufferedReader(new FileReader(profile));
+      try {
+        String rawline;
+        while ((rawline = reader.readLine()) != null) {
+          final String line = rawline.trim();
+          if (line.length() == 0 || line.charAt(0) == ';') {
+            continue;
+          }
+          final int sep = line.indexOf('=');
+          if (sep != -1) {
+            raw.put(line.substring(0, sep), line.substring(sep + 1));
+          }
+        }
+      } finally {
+        reader.close();
+      }
+      return raw;
+    }
+
+    /**
+     * The keys a profile file already states, under their current spelling.
+     *
+     * @param profile
+     *          The profile file (winprofile.ini)
+     * @return the keys, empty when there is no such file
+     * @throws IOException
+     *           Upon I/O error.
+     */
+    static Set<String> statedKeys(final File profile) throws IOException {
+      final Set<String> keys = new HashSet<String>();
+      if (!profile.exists()) {
+        return keys;
+      }
+      final BufferedReader reader = new BufferedReader(new FileReader(profile));
+      try {
+        String rawline;
+        while ((rawline = reader.readLine()) != null) {
+          final String line = rawline.trim();
+          final int sep = line.indexOf('=');
+          if (line.length() == 0 || line.charAt(0) == ';' || sep == -1) {
+            continue;
+          }
+          keys.add(canonicalName(line.substring(0, sep)));
+        }
+      } finally {
+        reader.close();
+      }
+      // Both name-mangling boxes live on the Dos line, so either states it.
+      if (keys.contains(ISO9660_KEY)) {
+        keys.add(DOS_KEY);
+      }
+      return keys;
+    }
+
+    /**
+     * Put PENDING in TARGET's place, dropping PENDING whichever way it goes.
+     *
+     * @throws IOException
+     *           When the rename fails, TARGET being left as it was.
+     */
+    static void commit(final File pending, final File target)
+        throws IOException {
+      try {
+        if (!pending.renameTo(target)) {
+          throw new IOException("could not rename " + pending + " over "
+              + target);
+        }
+      } finally {
+        pending.delete();
+      }
+    }
+
+    /**
+     * Write LINES over whatever CHANNEL holds, leaving CHANNEL open.
+     *
+     * @param channel
+     *          Where to write, never opened for append; the crawl holds its
+     *          lock here, so this must not close it
+     * @param lines
+     *          The already-encoded values; iteration order is write order
+     * @throws IOException
+     *           Upon I/O error.
+     */
+    static void write(final FileChannel channel,
+        final Map<String, String> lines) throws IOException {
+      final StringBuilder text = new StringBuilder();
+      for (final Map.Entry<String, String> line : lines.entrySet()) {
+        text.append(line.getKey()).append('=').append(line.getValue())
+            .append('\n');
+      }
+      // Overwritten, then trimmed. The profile is the only copy of the
+      // settings, so emptying it first would lose them to a failed write.
+      final ByteBuffer bytes = ByteBuffer.wrap(text.toString().getBytes());
+      channel.position(0);
+      while (bytes.hasRemaining()) {
+        channel.write(bytes);
+      }
+      channel.truncate(channel.position());
+    }
+  }
+
+  // Name-to-ID hash map
+  protected static final HashMap<String, Integer> fieldsNameToId = new HashMap<String, Integer>();
+
+  // buildCommandline() runs finish() in iteration order, which HashMap never promised.
+  protected final LinkedHashMap<String, OptionMapper> fieldsNameToMapper =
+      new LinkedHashMap<String, OptionMapper>();
+
+  // The options mapping
+  protected final SparseArraySerializable map = new SparseArraySerializable();
+
+  // Is the map dirty ?
+  protected boolean dirty;
+
+  // Current context
+  protected Context context;
+
+  // Static initializer.
+  static {
+    // Create fieldsNameToId
+    createFieldsNameToId();
+  }
+
+  /**
+   * Options mapper interface.
+   */
+  public static interface OptionMapper {
+    /**
+     * Optional interface to OptionMapper allowing to execute post-action.
+     */
+    public static interface FinishMapper {
+      /**
+       * FinisExecute post-action
+       *
+       * @param commandline
+       *          the commandline array
+       */
+      public void finish(final List<String> commandline);
+    }
+
+    /**
+     * Emit the option
+     *
+     * @param commandline
+     *          the commandline array
+     * @param value
+     *          the option value
+     */
+    public void emit(final List<String> commandline, final String value);
+  }
+
+  /**
+   * No-op mapper.
+   */
+  public static class NoOpOption implements OptionMapper {
+    /**
+     * An instance of the NoOpOption class.
+     */
+    public static final NoOpOption INSTANCE = new NoOpOption();
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+    }
+  }
+
+  /**
+   * Split into string pieces.
+   */
+  public static class StringSplit implements OptionMapper {
+    /**
+     * An instance of the basic StringSplit class.
+     */
+    public static final StringSplit INSTANCE = new StringSplit();
+
+    protected final String option;
+    protected final String split;
+
+    /**
+     * Default constructor. Splits lines.
+     */
+    public StringSplit() {
+      this(null);
+    }
+
+    /**
+     * Option-enabled feature ; when an option before each splitted string is
+     * required.
+     * 
+     * @param option
+     *          The option
+     * @param split
+     *          The split regexp
+     */
+    public StringSplit(final String split, final String option) {
+      this.split = split;
+      this.option = option;
+    }
+
+    /**
+     * Option-enabled feature ; when an option before each splitted string is
+     * required.
+     * 
+     * @param option
+     *          The option
+     */
+    public StringSplit(final String option) {
+      this("\\s+", option);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      // URLs
+      for (String s : cleanupString(value).trim().split(split)) {
+        s = s.trim();
+        if (s.length() != 0) {
+          if (option != null) {
+            commandline.add(option);
+          }
+          commandline.add(s);
+        }
+      }
+    }
+  }
+
+  /**
+   * URL field split: like StringSplit but drops option-looking tokens so a
+   * crafted winprofile.ini can't inject engine options (e.g. -O) through URLs.
+   */
+  public static class UrlSplit extends StringSplit {
+    /**
+     * An instance of the UrlSplit class.
+     */
+    public static final UrlSplit INSTANCE = new UrlSplit();
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      commandline.addAll(CommandlineTokens.urlTokens(value));
+    }
+  }
+
+  /**
+   * Line-separated list: emit the option once per line. Collapsing the blanks
+   * first, as StringSplit does, would eat the newlines and merge every line
+   * into one option.
+   */
+  public static class LineListOption extends StringSplit {
+    public LineListOption(final String option) {
+      super(option);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      for (final String line : CommandlineTokens.lineTokens(value)) {
+        commandline.add(option);
+        commandline.add(line);
+      }
+    }
+  }
+
+  /**
+   * Rule list: emit the option once per rule, matching how the engine
+   * accumulates repeated flags.
+   */
+  public static class RuleListOption extends StringSplit {
+    public RuleListOption(final String option) {
+      super(option);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      for (final String rule : CommandlineTokens.ruleTokens(value)) {
+        commandline.add(option);
+        commandline.add(rule);
+      }
+    }
+  }
+
+  /**
+   * Maximum size handler. Merge the two maximum size of html/non-html files
+   * options.
+   */
+  public static class MaxSizeHandler {
+    protected boolean finished = false;
+    /* The digits, not an int: the engine takes these up to INT64_MAX, and
+       parseInt turned anything over 2 GB into its 999999999 error default. */
+    protected String maxHtml = null;
+    protected String maxNonHtml = null;
+
+    /*
+     * Handle "abandon host if timeout"
+     */
+    private class Html implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (OptionValues.isAtMost(value, Long.MAX_VALUE)) {
+          MaxSizeHandler.this.maxHtml = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        MaxSizeHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Handle "abandon host if transfer rate too low"
+     */
+    private class NonHtml implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (OptionValues.isAtMost(value, Long.MAX_VALUE)) {
+          MaxSizeHandler.this.maxNonHtml = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        MaxSizeHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get the html size mapper
+     * 
+     * @return the html size mapper
+     */
+    public OptionMapper getHtml() {
+      return new Html();
+    }
+
+    /**
+     * Get the non-html size mapper
+     * 
+     * @return the non-html size mapper
+     */
+    public OptionMapper getNonHtml() {
+      return new NonHtml();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      // mN maximum file length for a non-html file (--max-files[=N])
+      // mN,N2 maximum file length for non html (N) and html (N2)
+      if (!finished) {
+        finished = true;
+        if (maxNonHtml != null || maxHtml != null) {
+          final StringBuilder option = new StringBuilder("-m");
+          if (maxNonHtml != null) {
+            option.append(maxNonHtml);
+          }
+          if (maxHtml != null) {
+            option.append(',');
+            option.append(maxHtml);
+          }
+          commandline.add(option.toString());
+        }
+      }
+    }
+  }
+
+  /**
+   * Host control handler. Merge the two
+   * "abandon host if timeout/transfer rate too slow" options into a single one.
+   */
+  public static class HostControlHandler {
+    protected boolean finished = false;
+    protected int flag = 0;
+
+    /*
+     * Handle "abandon host if timeout"
+     */
+    private class Time implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if ("1".equals(value)) {
+          HostControlHandler.this.flag |= 1;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        HostControlHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Handle "abandon host if transfer rate too low"
+     */
+    private class Rate implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if ("1".equals(value)) {
+          HostControlHandler.this.flag |= 2;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        HostControlHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get the transfer rate mapper
+     * 
+     * @return the transfer rate mapper
+     */
+    public OptionMapper getRateMapper() {
+      return new Rate();
+    }
+
+    /**
+     * Get the timeout mapper
+     * 
+     * @return the timeout mapper
+     */
+    public OptionMapper getTimeMapper() {
+      return new Time();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        commandline.add("-H" + flag);
+      }
+    }
+  }
+
+  /**
+   * DOS/ISO9660 flags.
+   */
+  public static class DosIso9660Handler {
+    protected boolean finished = false;
+    protected boolean dos = false;
+    protected boolean iso9660 = false;
+
+    /*
+     * Handle "abandon host if timeout"
+     */
+    private class Dos implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if ("1".equals(value)) {
+          DosIso9660Handler.this.dos = true;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        DosIso9660Handler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Handle "abandon host if transfer rate too low"
+     */
+    private class Iso9660 implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if ("1".equals(value)) {
+          DosIso9660Handler.this.iso9660 = true;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        DosIso9660Handler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get the dos flag mapper
+     * 
+     * @return the dos flag mapper
+     */
+    public OptionMapper getDosMapper() {
+      return new Dos();
+    }
+
+    /**
+     * Get the iso9660 flag mapper
+     * 
+     * @return the iso9660 flag mapper
+     */
+    public OptionMapper getIso9660Mapper() {
+      return new Iso9660();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        // Note: same logic (...) as WinHTTrack ; see WinHTTrack/Shell.cpp
+        if (dos || iso9660) {
+          commandline.add(dos ? "-L0" : "-L2");
+        }
+      }
+    }
+
+  }
+
+  /**
+   * Proxy settings handler.
+   */
+  public static class ProxyHandler {
+    protected boolean finished = false;
+    protected String address;
+    protected String port;
+    protected String protocol; // radio index: "1" == SOCKS5, "2" == CONNECT, else HTTP
+
+    /*
+     * Build type.
+     */
+    private class Address implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          ProxyHandler.this.address = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        ProxyHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Custom build
+     */
+    private class Port implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          ProxyHandler.this.port = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        ProxyHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get address mapper
+     * 
+     * @return the address mapper
+     */
+    public OptionMapper getAddressMapper() {
+      return new Address();
+    }
+
+    /**
+     * Get the port mapper
+     *
+     * @return the port build mapper
+     */
+    public OptionMapper getPortMapper() {
+      return new Port();
+    }
+
+    /*
+     * Proxy protocol selector (HTTP vs SOCKS5 vs HTTP CONNECT tunnel).
+     */
+    private class Protocol implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          ProxyHandler.this.protocol = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        ProxyHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get the protocol mapper
+     *
+     * @return the proxy protocol mapper
+     */
+    public OptionMapper getProtocolMapper() {
+      return new Protocol();
+    }
+
+    /*
+     * Where we really emit the option; each protocol prepends its scheme, and
+     * only SOCKS5 defaults to port 1080 instead of 8080. Value is the radio
+     * index: 0 HTTP, 1 SOCKS5, 2 HTTP CONNECT tunnel.
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        if (address != null) {
+          final boolean socks5 = "1".equals(protocol);
+          final boolean connect = "2".equals(protocol);
+          final String scheme =
+              socks5 ? "socks5://" : connect ? "connect://" : "";
+          final String defaultPort = socks5 ? "1080" : "8080";
+          commandline.add("-P");
+          commandline.add(scheme + address + ":"
+              + (port != null && port.length() != 0 ? port : defaultPort));
+        }
+      }
+    }
+  }
+
+  /**
+   * Build structure handler.
+   */
+  public static class BuildHandler {
+    protected boolean finished = false;
+    protected int build;
+    protected String custom;
+
+    /*
+     * Build type.
+     */
+    private class Type implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (OptionValues.isAtMost(value, Integer.MAX_VALUE)) {
+          BuildHandler.this.build = Integer.parseInt(value);
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        BuildHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Custom build
+     */
+    private class Custom implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          BuildHandler.this.custom = value;
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        BuildHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get type mapper
+     * 
+     * @return the type mapper
+     */
+    public OptionMapper getTypeMapper() {
+      return new Type();
+    }
+
+    /**
+     * Get the custom build mapper
+     * 
+     * @return the custom build mapper
+     */
+    public OptionMapper getCustomMapper() {
+      return new Custom();
+    }
+
+    /* Mapping to httrack build structure numbers. */
+    private static final int mapping[] = new int[] { 0, 1, 2, 3, 4, 5, 100,
+        101, 102, 103, 104, 105, 99, 199 };
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        if (build < mapping.length) {
+          commandline.add("-N" + mapping[build]);
+        } else if (build == mapping.length) {
+          commandline.add("-N");
+          commandline.add(custom);
+        }
+      }
+    }
+  }
+
+  /**
+   * Log settings handler.
+   */
+  public static class LogHandler {
+    protected boolean finished = false;
+    protected boolean enabled;
+    protected int type;
+
+    /*
+     * Build type.
+     */
+    private class Type implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (OptionValues.isAtMost(value, Integer.MAX_VALUE)) {
+          LogHandler.this.type = Integer.parseInt(value);
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        LogHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Custom build
+     */
+    private class Enabled implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          LogHandler.this.enabled = "1".equals(value);
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        LogHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get address mapper
+     * 
+     * @return the address mapper
+     */
+    public OptionMapper getTypeMapper() {
+      return new Type();
+    }
+
+    /**
+     * Get the port mapper
+     * 
+     * @return the port build mapper
+     */
+    public OptionMapper getEnabledMapper() {
+      return new Enabled();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        if (enabled) {
+          switch (type) {
+          case 0:
+            break;
+          case 1:
+            commandline.add("-z");
+            break;
+          case 2:
+            commandline.add("-Z");
+            break;
+          }
+        } else {
+          commandline.add("-Q");
+        }
+      }
+    }
+  }
+
+  /**
+   * primary scan handler.
+   */
+  public static class PrimaryScanHandler {
+    protected boolean finished = false;
+    protected boolean htmlFirst;
+    protected int type;
+
+    /*
+     * Type.
+     */
+    private class Type implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (OptionValues.isAtMost(value, Integer.MAX_VALUE)) {
+          PrimaryScanHandler.this.type = Integer.parseInt(value);
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        PrimaryScanHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Html first ?
+     */
+    private class HtmlFirst implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          PrimaryScanHandler.this.htmlFirst = "1".equals(value);
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        PrimaryScanHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get address mapper
+     * 
+     * @return the address mapper
+     */
+    public OptionMapper getTypeMapper() {
+      return new Type();
+    }
+
+    /**
+     * Get the port mapper
+     * 
+     * @return the port build mapper
+     */
+    public OptionMapper getHtmlFirstMapper() {
+      return new HtmlFirst();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        switch (type) {
+        case 0:
+        case 1:
+        case 2:
+          commandline.add("-p" + type);
+          break;
+        case 3:
+          commandline.add(htmlFirst ? "-p7" : "-p" + type);
+          break;
+        case 4:
+          commandline.add("-p7");
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * A feature checkbox and the value option that configures it. The engine
+   * switches the feature on for either one, so the value only reaches it while
+   * the box is ticked, as WinHTTrack does.
+   */
+  public static class GatedFeatureHandler {
+    protected final SimpleOptionFlag toggle;
+    protected final ArgumentOption value;
+    protected boolean enabled;
+
+    /**
+     * @param flag
+     *          The engine flag the checkbox emits
+     * @param option
+     *          The engine option the value follows
+     */
+    public GatedFeatureHandler(final String flag, final String option) {
+      this(flag, new ArgumentOption(option));
+    }
+
+    /**
+     * @param flag
+     *          The engine flag the checkbox emits
+     * @param value
+     *          The engine option the value follows
+     */
+    public GatedFeatureHandler(final String flag, final ArgumentOption value) {
+      this.toggle = new SimpleOptionFlag(flag);
+      this.value = value;
+    }
+
+    /* fieldsSerializer emits the checkbox first, which is what lets the value
+       read its state. */
+    private class Toggle implements OptionMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        GatedFeatureHandler.this.enabled = "1".equals(value);
+        toggle.emit(commandline, value);
+      }
+    }
+
+    private class Value implements OptionMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (GatedFeatureHandler.this.enabled) {
+          GatedFeatureHandler.this.value.emit(commandline, value);
+        }
+      }
+    }
+
+    /**
+     * Get the checkbox mapper
+     *
+     * @return the checkbox mapper
+     */
+    public OptionMapper getToggleMapper() {
+      return new Toggle();
+    }
+
+    /**
+     * Get the value mapper
+     *
+     * @return the value mapper
+     */
+    public OptionMapper getValueMapper() {
+      return new Value();
+    }
+  }
+
+  /**
+   * Log settings handler.
+   */
+  public static class MimeTypesHandler {
+    protected boolean finished = false;
+    protected String ext;
+    protected String mime;
+
+    /*
+     * Build type.
+     */
+    private class Ext implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          MimeTypesHandler.this.ext = value.trim();
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        MimeTypesHandler.this.finish(commandline);
+      }
+    }
+
+    /*
+     * Custom build
+     */
+    private class Mime implements OptionMapper, OptionMapper.FinishMapper {
+      @Override
+      public void emit(final List<String> commandline, final String value) {
+        if (value != null && value.length() != 0) {
+          MimeTypesHandler.this.mime = value.trim();
+        }
+      }
+
+      @Override
+      public void finish(final List<String> commandline) {
+        MimeTypesHandler.this.finish(commandline);
+      }
+    }
+
+    /**
+     * Get ext mapper
+     * 
+     * @return the ext mapper
+     */
+    public OptionMapper getExtMapper() {
+      return new Ext();
+    }
+
+    /**
+     * Get mime mapper
+     * 
+     * @return the mime mapper
+     */
+    public OptionMapper getMimeMapper() {
+      return new Mime();
+    }
+
+    /*
+     * Where we really emit the option
+     */
+    private void finish(final List<String> commandline) {
+      if (!finished) {
+        finished = true;
+        if (ext != null && mime != null && ext.length() != 0
+            && mime.length() != 0) {
+          commandline.add("-%A");
+          commandline.add(ext + "=" + mime);
+        }
+      }
+    }
+  }
+
+  /**
+   * Simple option (typically one character and an option). The fields mapped
+   * this way are all numeric; a value that is not is dropped.
+   */
+  public static class SimpleOption implements OptionMapper {
+    protected final String option;
+    protected final boolean fraction;
+    protected final long max;
+
+    /**
+     * @param option
+     *          The engine option
+     * @param fraction
+     *          true if the engine scans this option's value with %f
+     * @param max
+     *          Highest value the engine accepts for this option
+     */
+    public SimpleOption(final String option, final boolean fraction,
+        final long max) {
+      this.option = option;
+      this.fraction = fraction;
+      this.max = max;
+    }
+
+    public SimpleOption(final String option, final boolean fraction) {
+      this(option, fraction, Integer.MAX_VALUE);
+    }
+
+    public SimpleOption(final String option) {
+      this(option, false);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      /* A '.' anywhere else is fatal: an integer option leaves it unconsumed
+       * and the engine panics, and cmdl_opt reads a '%'-less token holding one
+       * as a URL, which turns -r1.5 into an exclusion filter. */
+      /* Over the cap the engine refuses the command line or misreads the
+       * value, and no layout bounds these fields. */
+      /* A rate the engine refuses is clamped, because dropping it would leave
+       * the crawl with no rate limit at all. */
+      if (fraction ? OptionValues.isDecimal(value) : OptionValues.isAtMost(
+          value, max)) {
+        commandline.add(
+            "-" + option + (fraction ? OptionValues.clampRate(value) : value));
+      } else {
+        refused(commandline, value);
+      }
+    }
+
+    /** What to send instead of a value the engine would not take. Nothing. */
+    protected void refused(final List<String> commandline, final String value) {
+    }
+  }
+
+  /**
+   * Simple option whose ceiling is not the engine's plain int maximum, and
+   * which sends nothing above it. ClampedOption sends the ceiling.<br/>
+   * Example: -u2
+   */
+  public static class CappedOption extends SimpleOption {
+    public CappedOption(final String option, final long max) {
+      super(option, false, max);
+    }
+  }
+
+  /**
+   * Simple option that sends the ceiling rather than nothing above it, because
+   * the engine clips it there. CappedOption sends nothing.<br/>
+   * Example: -%J60
+   */
+  public static class ClampedOption extends SimpleOption {
+    public ClampedOption(final String option, final long max) {
+      super(option, false, max);
+    }
+
+    @Override
+    protected void refused(final List<String> commandline, final String value) {
+      /* Sending nothing would leave the engine on its own default, which is
+       * below the ceiling, so asking for more would get less. An unreadable
+       * value still goes nowhere, because its leftover characters would be
+       * read as another option. */
+      if (OptionValues.isDigits(value)) {
+        commandline.add("-" + option + max);
+      }
+    }
+  }
+
+  /**
+   * Argument option (<option> <value>)<br/>
+   * Example: -F "user-agent"
+   */
+  public static class ArgumentOption implements OptionMapper {
+    protected final String option;
+
+    public ArgumentOption(final String option) {
+      this.option = option;
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      if (value != null && value.length() != 0) {
+        commandline.add(option);
+        commandline.add(value);
+      }
+    }
+  }
+
+  /**
+   * Accept header of one kind of link, or of every other kind under AcceptPresets.NO_KIND. The
+   * engine reads the kind inside the value, as --accept 'image=text/avif'.
+   */
+  public static class AcceptOption extends ArgumentOption {
+    protected final String kind;
+
+    public AcceptOption(final String kind) {
+      super("--accept");
+      this.kind = kind;
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      final String accept = value != null ? value.trim() : "";
+      if (accept.length() == 0
+          || !OptionValues.fitsBytes(accept, MAX_ACCEPT_BYTES)
+          || OptionValues.hasControlCharacter(accept)) {
+        return;
+      }
+      if (kind.length() != 0) {
+        super.emit(commandline, kind + "=" + accept);
+        return;
+      }
+      /* Only the default row can emit something other than the typed value. A dash-prefixed
+         token reads as the next option and kills the whole command line. A token naming a kind
+         sets that kind's row instead and drops the default. The test is the dash alone, not
+         CommandlineTokens.isOptionLike, which also refuses a '+' the engine accepts. */
+      if (accept.charAt(0) != '-' && !AcceptPresets.namesAKind(accept)) {
+        super.emit(commandline, accept);
+      }
+    }
+  }
+
+  /**
+   * Argument option whose value must be a positive number: the engine panics
+   * on zero or a non-digit, and no layout attribute can filter either.
+   * inputType is a keyboard hint, and a saved profile sets the value directly.
+   */
+  public static class NumberArgumentOption extends ArgumentOption {
+    public NumberArgumentOption(final String option) {
+      super(option);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      if (OptionValues.isPositive(value)) {
+        super.emit(commandline, value);
+      }
+    }
+  }
+
+  /**
+   * Option without any value, but with optional '0' disable flag. Example: -%k
+   * and -%k0
+   */
+  public static class SimpleOption0 implements OptionMapper {
+    protected final String option;
+
+    public SimpleOption0(final String option) {
+      this.option = option;
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      if (value != null && value.length() != 0) {
+        commandline.add("-" + option + ("0".equals(value) ? "0" : ""));
+      }
+    }
+  }
+
+  /**
+   * Option without any value. Example: -n or nothing
+   */
+  public static class SimpleOptionFlag implements OptionMapper {
+    protected final String option;
+    protected final boolean reverted;
+
+    public SimpleOptionFlag(final String option, final boolean reverted) {
+      this.option = option;
+      this.reverted = reverted;
+    }
+
+    public SimpleOptionFlag(final String option) {
+      this(option, false);
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      if (value != null && value.length() != 0) {
+        if ((!reverted && "1".equals(value)) || (reverted && "0".equals(value))) {
+          commandline.add("-" + option);
+        }
+      }
+    }
+  }
+
+  /**
+   * Radio-button option: the selected index picks the engine flag to emit.
+   */
+  public static class MultipleChoicesOption implements OptionMapper {
+    public static final MultipleChoicesOption ACTION =
+        new MultipleChoicesOption(new String[] { "iC1", "iC2" });
+    public static final MultipleChoicesOption TRAVEL =
+        new MultipleChoicesOption(new String[] { "S", "D", "U", "B" });
+    public static final MultipleChoicesOption GLOBAL_TRAVEL =
+        new MultipleChoicesOption(new String[] { "a", "d", "l", "e" });
+    public static final MultipleChoicesOption REWRITE_LINKS =
+        new MultipleChoicesOption(new String[] { "K0", "K", "K3", "K4" });
+
+    protected final String[] choices;
+
+    public MultipleChoicesOption(final String[] choices) {
+      this.choices = choices;
+    }
+
+    @Override
+    public void emit(final List<String> commandline, final String value) {
+      if (OptionValues.isDigits(value)) {
+        // All digits still overflows: a hand-edited profile reaches this.
+        final int choiceId = OptionValues.parseInt(value, -1);
+        if (choiceId >= 0 && choiceId < choices.length) {
+          final String choice = choices[choiceId];
+          if (choice != null && choice.length() != 0) {
+            commandline.add("-" + choice);
+          }
+        }
+      }
+    }
+  }
+
+  /** The serialization key of a field id, or the id itself for a field no key covers. */
+  private static String fieldName(final int id) {
+    for (final Pair<Integer, String> field : fieldsSerializer) {
+      if (field.first == id) {
+        return field.second;
+      }
+    }
+    return String.valueOf(id);
+  }
+
+  /*
+   * Build fieldsNameToId
+   */
+  private static void createFieldsNameToId() {
+    // Create fieldsNameToId
+    for (final Pair<Integer, String> field : fieldsSerializer) {
+      final int id = field.first;
+      final String fkey = field.second;
+      if (fieldsNameToId.containsKey(fkey)) {
+        throw new RuntimeException("unexpected internal error with " + fkey);
+      }
+      fieldsNameToId.put(fkey, id);
+    }
+  }
+
+  /*
+   * Build fieldsNameToMapper
+   */
+  private void createFieldsNameToMapper() {
+    for (final Pair<String, OptionMapper> field : fieldsMapper) {
+      final String id = field.first;
+      final OptionMapper fkey = field.second;
+      if (fieldsNameToMapper.containsKey(id)) {
+        throw new RuntimeException("unexpected internal error with " + id);
+      }
+      fieldsNameToMapper.put(id, fkey);
+    }
+  }
+
+  /*
+   * Map special values, depending on the context.
+   */
+  private void setDynamicDefaults() {
+    if (context != null) {
+      // Derive the ISO code from the runtime locale, not a build-time placeholder.
+      final String iso = Locale.getDefault().getLanguage();
+      map.put(fieldsNameToId.get("AcceptLanguage"),
+          (iso == null || iso.isEmpty() ? "en" : iso) + ",*");
+    }
+  }
+
+  /*
+   * Fill the map with default values
+   */
+  protected static void initializeMap(final SparseArraySerializable map) {
+    map.clear();
+    for (final Pair<String, String> field : fieldsDefaults) {
+      final Integer id = fieldsNameToId.get(field.first);
+      if (id == null) {
+        throw new RuntimeException("unexpecter error: unknown key "
+            + field.first);
+      }
+      map.put(id, field.second);
+    }
+  }
+
+  /*
+   * Fill the map with default values
+   */
+  public void initializeMap() {
+    initializeMap(map);
+    setDynamicDefaults();
+  }
+
+  /**
+   * Cleanup a space-separated string.
+   * 
+   * @param s
+   *          The string
+   * @return the cleaned up string
+   */
+  public static String cleanupString(final String s) {
+    return s != null ? s.replaceAll("\\s+", " ").trim() : null;
+  }
+
+  /**
+   * Is this space-separated string non empty ?
+   * 
+   * @param s
+   *          The string
+   * @return true if the string was not empty
+   */
+  public static boolean isStringNonEmpty(final String s) {
+    final String cleaned = cleanupString(s);
+    return cleaned != null && cleaned.length() != 0;
+  }
+
+  /**
+   * Build a new options mapper.
+   * 
+   * @param context
+   *          Attached context.
+   */
+  public OptionsMapper(final Context context) {
+    setContext(context);
+
+    // Create fieldsNameToMapper
+    createFieldsNameToMapper();
+
+    // Initialize default values for map
+    initializeMap();
+  }
+
+  /**
+   * Build a new options mapper.
+   */
+  public OptionsMapper() {
+    this(null);
+  }
+
+  /**
+   * Set the context.
+   * 
+   * @param context
+   *          The context
+   */
+  public void setContext(final Context context) {
+    this.context = context;
+  }
+
+  /**
+   * Get a map value.
+   * 
+   * @param key
+   *          The key
+   * @return The value
+   */
+  public String getMap(final int key) {
+    return map.get(key);
+  }
+
+  private String nonNullString(final String s) {
+    return s != null ? s : "";
+  }
+
+  /**
+   * Clear the map, wiping all keys/values, assigning default ones.
+   */
+  public void resetMap() {
+    // Clear everything
+    map.clear();
+
+    // Initialize default values for map
+    initializeMap();
+
+    // Load default preferences if any
+    loadDefaultPreferences();
+
+    dirty = false;
+  }
+
+  /**
+   * Set a map value.
+   * 
+   * @param key
+   *          The key
+   * @param value
+   *          The value
+   */
+  public void setMap(final int key, final String value) {
+    if (!dirty) {
+      final String previous = map.get(key);
+      dirty = previous != value
+          && !nonNullString(previous).equals(nonNullString(value));
+      if (dirty) {
+        // A value can hold a credential, and a newline in it forges a log line.
+        Log.d(getClass().getSimpleName(), "map set dirty: " + fieldName(key));
+      }
+    }
+    map.put(key, value);
+  }
+
+  /**
+   * Return the underlying map size.
+   * 
+   * @return the underlying map size
+   */
+  public int size() {
+    return map.size();
+  }
+
+  /**
+   * Get URLs
+   * 
+   * @return the URLs
+   */
+  protected String getProjectUrl() {
+    return cleanupString(getMap(R.id.fieldWebsiteURLs));
+  }
+
+  /**
+   * Get the current project name
+   * 
+   * @return The current project name
+   */
+  public String getProjectName() {
+    return cleanupString(getMap(R.id.fieldProjectName));
+  }
+
+  /*
+   * winprofile.ini encoding. the encoding is a bit lame, but is compatible with
+   * WinHTTrack format.
+   */
+  private static String profileEncode(final String s) {
+    final StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < s.length(); i++) {
+      final char c = s.charAt(i);
+      if (c == '%') {
+        builder.append("%%");
+      } else if (c < 32) {
+        builder.append('%');
+        builder.append(String.format("%02x", (int) c));
+      } else {
+        builder.append(c);
+      }
+    }
+    return builder.toString();
+  }
+
+  /*
+   * winprofile.ini decoding. the encoding is a bit lame, but is compatible with
+   * WinHTTrack format.
+   */
+  private static String profileDecode(final String s) throws IOException {
+    final StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < s.length(); i++) {
+      final char c = s.charAt(i);
+      if ((int) c < 32 && c != '\t' && c != '\r' && c != '\n') {
+        throw new IOException("invalid control character");
+      }
+      if (c == '%') {
+        if (i + 1 >= s.length()) {
+          throw new IOException("invalid escaped sequence (% at end of line)");
+        }
+        final char d = s.charAt(i + 1);
+        if (d == '%') {
+          i++;
+          builder.append('%');
+        } else {
+          if (i + 2 >= s.length()) {
+            throw new IOException("invalid escaped sequence (truncated %)");
+          }
+          try {
+            final int code = Integer.parseInt(s.substring(i + 1, i + 3), 16);
+            i += 2;
+            builder.append((char) code);
+          } catch (final NumberFormatException nfe) {
+            throw new IOException(
+                "invalid escaped sequence (invalid % number): "
+                    + nfe.getMessage());
+          }
+        }
+      } else {
+        builder.append(c);
+      }
+    }
+    return builder.toString();
+  }
+
+  /**
+   * Unserialize a specific profile from disk.
+   * 
+   * @param profile
+   *          The profile file (winprofile.ini), may be null
+   * @param map
+   *          The map to be filled
+   * 
+   * @throws IOException
+   *           When there is no profile to read, or upon I/O error.
+   */
+  public static void unserialize(final File profile,
+      final SparseArray<String> map) throws IOException {
+    final Map<String, String> decoded = new LinkedHashMap<String, String>();
+    for (final Map.Entry<String, String> line : ProfileFormat.rawFields(profile)
+        .entrySet()) {
+      decoded.put(line.getKey(), OptionsMapper.profileDecode(line.getValue()));
+    }
+    for (final Map.Entry<String, String> field : ProfileFormat.resolve(decoded)
+        .entrySet()) {
+      final Integer id = OptionsMapper.fieldsNameToId.get(field.getKey());
+      if (id != null) {
+        map.put(id, field.getValue());
+      }
+    }
+  }
+
+  /**
+   * Is the map dirty ?
+   * 
+   * @return true if the map is dirty
+   */
+  public boolean isDirty() {
+    return dirty;
+  }
+
+  private static Map<String, String> valuesOf(final SparseArray<String> map) {
+    final Map<String, String> values = new LinkedHashMap<String, String>();
+    for (final Pair<Integer, String> field : OptionsMapper.fieldsSerializer) {
+      values.put(field.second, map.get(field.first));
+    }
+    return values;
+  }
+
+  /* What a freshly reset profile holds, on a throwaway mapper: the saved
+     defaults resetMap() layers on top are part of the baseline. */
+  private Map<String, String> seededValues() {
+    final OptionsMapper seed = new OptionsMapper(context);
+    seed.resetMap();
+    return valuesOf(seed.map);
+  }
+
+  /* What we substitute for an absent key, by key. */
+  private static Map<String, String> ourDefaults() {
+    final Map<String, String> defaults = new LinkedHashMap<String, String>();
+    for (final Pair<String, String> field : OptionsMapper.fieldsDefaults) {
+      defaults.put(field.first, field.second);
+    }
+    return defaults;
+  }
+
+  /**
+   * Serialize settings to a caller-owned channel, left open.
+   * 
+   * @param channel
+   *          Where to write, over whatever it held.
+   * @param profile
+   *          The existing profile whose stated keys must be preserved; not
+   *          necessarily where the channel writes.
+   * @throws UnsupportedEncodingException
+   *           Upon encoding error
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  public void serialize(final FileChannel channel, final File profile)
+      throws UnsupportedEncodingException, IOException {
+    final Map<String, String> values = valuesOf(map);
+    Set<String> present;
+    try {
+      present = ProfileFormat.statedKeys(profile);
+    } catch (final IOException e) {
+      // Nothing may be dropped from a profile we could not read back.
+      present = values.keySet();
+    }
+    final Map<String, String> file = ProfileFormat.toFile(values,
+        seededValues(), ourDefaults(), present);
+    final Map<String, String> lines = new LinkedHashMap<String, String>();
+    for (final Pair<Integer, String> field : OptionsMapper.fieldsSerializer) {
+      final String key = field.second;
+      if (!file.containsKey(key)) {
+        continue;
+      }
+      final String value = file.get(key);
+      lines.put(key, value != null ? OptionsMapper.profileEncode(value) : "");
+    }
+    ProfileFormat.write(channel, lines);
+    if (dirty) {
+      dirty = false;
+      Log.d(getClass().getSimpleName(),
+          "map set clean: serialize to file (sync'ed)");
+    }
+  }
+
+  /**
+   * Serialize settings on disk.
+   * 
+   * @param profile
+   *          The profile file.
+   * @throws UnsupportedEncodingException
+   *           Upon encoding error
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  public void serialize(final File profile)
+      throws UnsupportedEncodingException, IOException {
+    // Through a sibling: a write that dies half way must not leave a truncated
+    // profile behind, and statedKeys reads the original, which writing in place
+    // would have emptied.
+    final File pending = new File(profile.getPath() + ".tmp");
+    try {
+      final FileOutputStream fos = new FileOutputStream(pending);
+      try {
+        serialize(fos.getChannel(), profile);
+        // Reach the disk before the rename does.
+        fos.getFD().sync();
+      } finally {
+        fos.close();
+      }
+      ProfileFormat.commit(pending, profile);
+    } finally {
+      pending.delete();
+    }
+  }
+
+  /**
+   * Serialize the map
+   * 
+   * @return a Parcelable object
+   */
+  public Parcelable serialize() {
+    return map;
+  }
+
+  /**
+   * Unserialize profile from disk.
+   * 
+   * @throws IOException
+   *           Upon I/O error.
+   */
+  protected void unserialize(final File profile) throws IOException {
+    unserialize(profile, map);
+    if (dirty) {
+      dirty = false;
+      Log.d(getClass().getSimpleName(),
+          "map set clean: unserialize from file (sync'ed)");
+    }
+  }
+
+  /**
+   * Unserialize object.
+   * 
+   * @param object
+   *          the Parcelable object
+   */
+  public void unserialize(final Parcelable object) {
+    map.unserialize(object);
+  }
+
+  // Per-project identity fields: they must never be part of the default options.
+  private static final int identityFields[] = {R.id.fieldProjectName,
+      R.id.fieldProjectCategory};
+
+  private static boolean isIdentityField(final int id) {
+    for (final int field : OptionsMapper.identityFields) {
+      if (field == id) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /*
+   * Load default preferences.
+   */
+  public void loadDefaultPreferences() {
+    if (context != null) {
+      final SharedPreferences settings = context.getSharedPreferences(
+          PREFS_NAME, 0);
+      // Snapshot the current project identity before the map reset wipes it.
+      final SparseArray<String> identity = new SparseArray<String>();
+      for (final int id : OptionsMapper.identityFields) {
+        identity.put(id, getMap(id));
+      }
+      initializeMap();
+      for (final Pair<Integer, String> field : OptionsMapper.fieldsSerializer) {
+        // A stale saved default must not resurrect a wrong project identity.
+        if (isIdentityField(field.first)) {
+          continue;
+        }
+        final String key = field.second;
+        String value = settings.getString(key, null);
+        if (value == null) {
+          final String legacy = ProfileFormat.legacyName(key);
+          if (legacy != null) {
+            value = settings.getString(legacy, null);
+          }
+        }
+        if (value != null) {
+          setMap(field.first, value);
+        }
+      }
+      // Restore the project identity the default options must not touch.
+      for (int i = 0; i < identity.size(); i++) {
+        setMap(identity.keyAt(i), identity.valueAt(i));
+      }
+    }
+  }
+
+  /*
+   * Save default preferences.
+   */
+  public void saveDefaultPreferences() {
+    if (context != null) {
+      final SharedPreferences settings = context.getSharedPreferences(
+          PREFS_NAME, 0);
+      final SharedPreferences.Editor editor = settings.edit();
+      for (final Pair<Integer, String> field : OptionsMapper.fieldsSerializer) {
+        // Never persist per-project identity as a global default.
+        if (isIdentityField(field.first)) {
+          continue;
+        }
+        final String value = getMap(field.first);
+        final String key = field.second;
+        editor.putString(key, value);
+        // Make the rename one-way, so a stale copy can never win a later read.
+        final String legacy = ProfileFormat.legacyName(key);
+        if (legacy != null) {
+          editor.remove(legacy);
+        }
+      }
+      editor.commit();
+    }
+  }
+
+  /*
+   * Reset default preferences.
+   */
+  public void resetDefaultPreferences() {
+    if (context != null) {
+      final SharedPreferences settings = context.getSharedPreferences(
+          PREFS_NAME, 0);
+      final SharedPreferences.Editor editor = settings.edit();
+      editor.clear();
+      editor.commit();
+    }
+  }
+
+  /**
+   * Build commandline arguments for the httrack engine, depending on current
+   * defined settings.
+   * 
+   * @return The commandline argument(s)
+   */
+  public List<String> buildCommandline() {
+    final List<String> args = new ArrayList<String>();
+    final String action = getMap(R.id.radioAction);
+
+    // Map all options
+    for (final Pair<Integer, String> field : OptionsMapper.fieldsSerializer) {
+      final String value = getMap(field.first);
+      final String key = field.second;
+      if (value != null) {
+        // Only here can one option see another: the table entries are blind to each other.
+        if (CACHE_KEY.equals(key)
+            && !CachePolicy.emitsCacheOption(action, value)) {
+          continue;
+        }
+        final OptionMapper map = fieldsNameToMapper.get(key);
+        if (map == null) {
+          Log.v(getClass().getSimpleName(), "option not mapped: " + key);
+        } else {
+          map.emit(args, value);
+        }
+      }
+    }
+
+    // Call finish for special mappers
+    for (final OptionMapper map : fieldsNameToMapper.values()) {
+      if (map instanceof OptionMapper.FinishMapper) {
+        OptionMapper.FinishMapper.class.cast(map).finish(args);
+      }
+    }
+
+    // Return final args
+    return args;
+  }
+}

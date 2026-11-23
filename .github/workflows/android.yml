@@ -1,0 +1,143 @@
+# Android build + test for httrack-android.
+# Style follows the httrack repo (least-privilege, concurrency cancel, submodules
+# recursive). Phase A is self-contained: it sets up the NDK, cross-compiles OpenSSL
+# (cached), vendors libiconv, and ndk-builds the native libs — no pre-published
+# image needed. (The docker/ toolchain image + docker-image.yml exist for the later
+# Gradle/assemble phase, which needs the full SDK.)
+name: Android
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: r27d
+
+# native and assemble are the two required checks. Never give either a job-level `if:`,
+# because a skipped check run counts as success and auto-merge would land on a build that never ran.
+jobs:
+  # Native-only: proves recursive submodules (incl. nested coucal), libiconv
+  # vendoring, OpenSSL 3.x, and the 64-bit ndk-build. x86_64 needs the coffeecatch
+  # ucontext fix (xroche/coffeecatch#46, in the pinned submodule); its legacy block
+  # #errors on x86_64 without it.
+  native:
+    name: native (ndk-build)
+    runs-on: ubuntu-24.04
+    env:
+      ABIS: arm64-v8a x86_64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive          # MUST be recursive: coucal is nested in httrack
+      - name: Set up NDK ${{ env.NDK_VERSION }}
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          # No local-cache: its restore can yield an NDK missing the clang
+          # binaries ("clang: No such file or directory"); download fresh each run.
+      - name: Cache OpenSSL statics
+        id: ssl-cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/openssl-android
+          # Key on the recipe itself. Keying on the version alone served a stale
+          # cache whenever a build flag changed but the version did not.
+          key: openssl-${{ hashFiles('docker/build-openssl.sh') }}-ndk-${{ env.NDK_VERSION }}-${{ env.ABIS }}
+      - name: Build OpenSSL (cache miss)
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: OUT=/tmp/openssl-android bash docker/build-openssl.sh
+      - name: Vendor libiconv
+        run: tools/ci/vendor-libiconv.sh
+      - name: Stage OpenSSL statics into prebuild/
+        run: OPENSSL_ANDROID_ROOT=/tmp/openssl-android tools/ci/fetch-openssl-statics.sh
+      - name: ndk-build
+        working-directory: app/src/main    # contains jni/ — ndk-build auto-discovers Android.mk + Application.mk
+        run: ${{ steps.ndk.outputs.ndk-path }}/ndk-build APP_ABI="${ABIS}" APP_PLATFORM=android-24 -j"$(nproc)"
+      # The test runs here, not beside the other tool tests, because only this job
+      # and assemble are required checks, and it guards the gate below it.
+      - run: tools/ci/check-branch-protection-test.sh
+      # This runs here too: the string generator has no other check.
+      - run: tools/build_strings-test.sh
+      - name: Check arm64 branch protection
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: tools/ci/check-branch-protection.sh app/src/main/libs
+      - uses: actions/upload-artifact@v7
+        if: always()                     # a failed check is when the libraries are worth reading
+        with:
+          name: native-libs
+          path: app/src/main/libs/**/*.so
+          if-no-files-found: warn
+
+  # AGP drives ndk-build, so the native inputs must be staged before ./gradlew (keeping
+  # that here rather than in a preBuild hook leaves Gradle offline-clean for local builds).
+  assemble:
+    name: assemble (AGP 8)
+    runs-on: ubuntu-24.04
+    container: ghcr.io/xroche/httrack-android-build:latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive          # MUST be recursive: coucal is nested in httrack
+      - name: Vendor libiconv
+        run: tools/ci/vendor-libiconv.sh
+      - name: Stage OpenSSL statics into prebuild/
+        run: tools/ci/fetch-openssl-statics.sh    # picks up $OPENSSL_ANDROID_ROOT from the image
+      - name: Gradle assemble + test + lint
+        run: ./gradlew --no-daemon assembleDebug assembleRelease testDebugUnitTest lint
+      - name: Check 16 KB .so alignment
+        run: |
+          for apk in app/build/outputs/apk/*/*.apk; do
+            tools/ci/check-so-alignment.sh "$apk"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()                     # the report is what says which case broke
+        with:
+          name: test-results
+          path: app/build/reports/tests/**
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()                     # the report is most useful when lint is unhappy
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-*.*
+          if-no-files-found: warn
+
+  # play-promote.yml only runs by hand against the live Play API; this is its only guard.
+  play-tools:
+    name: play tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: pip install -r tools/ci/play-requirements.txt
+      - run: python3 tools/ci/play_track_admin_test.py
+      - run: python3 tools/ci/play_reviews_test.py
+      - run: python3 tools/ci/play_vitals_test.py
+      # No job builds an .aab, so the alignment script's bundle branch has no other cover.
+      - run: tools/ci/check-so-alignment-test.sh
+
+  # --- Phases below land with the app modernization (see the plan) ---
+  #
+  # emulator-smoke: reactivecircus/android-emulator-runner (x86_64, api 21/29/34),
+  #   installs the APK and runs an instrumented crawl against a local fixture
+  #   server. Needs Phase 4 (storage) + the coffeecatch x86_64 fix.

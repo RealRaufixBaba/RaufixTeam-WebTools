@@ -1,0 +1,341 @@
+package com.httrack.android;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+/**
+ * Where mirrors may be written: decides whether a persisted setting is honoured or destroyed.
+ * Kept apart from the Context lookups so it can run off-device. Mostly path math, but
+ * {@link #resolveRoot} also stats the base it is handed.
+ */
+final class StoragePaths {
+  private StoragePaths() {
+  }
+
+  /**
+   * Whether a canonical path lies at or under a canonical root. The separator on both sides is
+   * what keeps a sibling like "files2" from matching "files".
+   */
+  static boolean isInsideRoot(final String path, final String root) {
+    return (path + File.separator).startsWith(root + File.separator);
+  }
+
+  /**
+   * Whether {@code path} lies inside one of our own storage roots, either of which may be null.
+   *
+   * @param path
+   *          the candidate, need not exist
+   * @param external
+   *          getExternalFilesDir(null), null while the volume is unmounted
+   * @param internal
+   *          getFilesDir(), the fallback root
+   * @return true inside a root, false provably outside, and null when the question cannot be
+   *         answered: with the external root unresolved there is nothing to compare against, and
+   *         a caller that reads that as a refusal would discard a setting it cannot vet.
+   */
+  static Boolean isWritable(final File path, final File external, final File internal) {
+    return isWritable(path, external, internal, null);
+  }
+
+  /**
+   * As {@link #isWritable(File, File, File)}, plus {@code shared}: a public storage root the app
+   * may write only when it holds all-files access. Kept a distinct root because a public path is
+   * writable exactly when that access is held, which only the Context layer knows.
+   *
+   * @param shared
+   *          the public root (e.g. getExternalStorageDirectory()) when access is held, else null.
+   *          Does not affect the null-vs-false verdict, which stays keyed on external.
+   */
+  static Boolean isWritable(final File path, final File external, final File internal,
+      final File shared) {
+    try {
+      final String target = path.getCanonicalPath();
+      for (final File root : new File[] { external, internal, shared }) {
+        if (root != null && isInsideRoot(target, root.getCanonicalPath())) {
+          return true;
+        }
+      }
+    } catch (final IOException e) {
+      return null;
+    }
+    return external != null ? Boolean.FALSE : null;
+  }
+
+  /**
+   * Default mirror root: the classic public HTTrack/Websites when shared storage is ours to
+   * write, so other apps and upgraders find the mirrors, else our own private Websites.
+   *
+   * <p>Takes its roots in the same order as {@link #isWritable}, since a transposition between
+   * same-typed neighbours would compile and still return a plausible directory.
+   *
+   * @param external
+   *          getExternalFilesDir(null), null while the volume is unmounted
+   * @param internal
+   *          getFilesDir(), the fallback root
+   * @param shared
+   *          the public root (e.g. getExternalStorageDirectory()) when all-files access is held,
+   *          else null
+   */
+  static File defaultRoot(final File external, final File internal, final File shared) {
+    if (shared != null) {
+      return new File(new File(shared, "HTTrack"), "Websites");
+    }
+    return new File(external != null ? external : internal, "Websites");
+  }
+
+  /**
+   * Whether a resume is the moment storage access appeared, which is the only resume that can
+   * newly reveal anything. Every other one must stay silent rather than re-ask.
+   *
+   * @param hadAccess
+   *          access as it stood at the previous check
+   * @param hasAccess
+   *          access as it stands now
+   */
+  static boolean accessJustAppeared(final boolean hadAccess, final boolean hasAccess) {
+    return hasAccess && !hadAccess;
+  }
+
+  /**
+   * Whether the freshly resolved root differs from the one in use, the first resolution counting
+   * as a move. Gates the work that must happen once per move, not once per resume.
+   *
+   * @param previous
+   *          the root in use, null before anything was resolved
+   */
+  static boolean rootMoved(final File previous, final File resolved) {
+    return previous == null || !previous.equals(resolved);
+  }
+
+  /** The side effects of a move, behind an interface so a test can record them instead. */
+  interface RootMoveActions {
+    /** The persisted base named a directory we could not create; worth saying once. */
+    void warnMissingDirectory();
+
+    /** Point the native side at the new root, so its logs land under it. */
+    void initNativeRoot(final File root);
+
+    /** The listed projects are the ones under the root, so the suggestions went stale. */
+    void refreshProjectSuggestions();
+
+    /** Nothing is migrated, so the projects made before a move stay where they were. */
+    void noteMovedFrom(final File previous);
+  }
+
+  /**
+   * Runs the work owed once per move, and nothing at all otherwise: initRootPath leaks a buffer
+   * per call and the warning would loop as a toast, both of which a resume would repeat.
+   *
+   * @param previous
+   *          the root in use, null before anything was resolved
+   * @param resolved
+   *          the freshly resolved root
+   * @param missingDir
+   *          whether the persisted base could not be created
+   * @param actions
+   *          the side effects to run
+   * @return whether the root moved
+   */
+  static boolean applyRootMove(final File previous, final File resolved, final boolean missingDir,
+      final RootMoveActions actions) {
+    if (!rootMoved(previous, resolved)) {
+      return false;
+    }
+    if (missingDir) {
+      actions.warnMissingDirectory();
+    }
+    actions.initNativeRoot(resolved);
+    if (previous != null) {
+      // Nothing was listed before the first resolution.
+      actions.refreshProjectSuggestions();
+      actions.noteMovedFrom(previous);
+    }
+    return true;
+  }
+
+  /**
+   * Mirror root to use: the persisted base when it is vetted writable and present, else the
+   * current default. Deliberately blind to the root in use, so that gaining or losing access
+   * re-points the running session instead of waiting for the next cold start.
+   *
+   * @param base
+   *          the persisted base path, or null when none is set; call after any mkdirs attempt,
+   *          since a base that is not yet a directory is refused
+   * @param writable
+   *          {@link #isWritable} verdict for base; only a decided yes is honoured
+   * @param defaultRoot
+   *          the fallback root
+   * @return base, or defaultRoot whenever base is unset, unvetted or not a directory
+   */
+  static File resolveRoot(final File base, final Boolean writable, final File defaultRoot) {
+    if (base != null && Boolean.TRUE.equals(writable) && base.isDirectory()) {
+      return base;
+    }
+    return defaultRoot;
+  }
+
+  /**
+   * Mirrors left by builds before versionCode 61, which wrote under Download/ rather than the
+   * shared HTTrack/ root every build since uses. Returns the folder only when it holds a project
+   * with something in it, so a caller can stay silent rather than ask about nothing.
+   *
+   * @param shared
+   *          the shared storage root, null when we have no access to look
+   * @return the legacy folder, or null when there is nothing to offer
+   */
+  static File legacyMirrorRoot(final File shared) {
+    if (shared == null) {
+      return null;
+    }
+    final File legacy = new File(new File(new File(shared, "Download"), "HTTrack"), "Websites");
+    final File[] entries = legacy.listFiles();
+    if (entries == null) {
+      return null;
+    }
+    for (final File entry : entries) {
+      final String[] project = entry.list();
+      if (project != null && project.length != 0) {
+        return legacy;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Documents-provider id ("primary:&lt;relative&gt;") to open {@code dir} in the system Files app via
+   * ACTION_VIEW, or null when it lies outside the primary shared volume or inside the Android/ subtree
+   * (both hidden from file managers on Android 11+), so the caller falls back.
+   *
+   * @param dir
+   *          the folder to open, need not exist
+   * @param shared
+   *          the primary shared root (getExternalStorageDirectory()), or null while unmounted
+   */
+  static String externalStorageDocId(final File dir, final File shared) {
+    if (dir == null || shared == null) {
+      return null;
+    }
+    try {
+      final String root = shared.getCanonicalPath();
+      final String path = dir.getCanonicalPath();
+      if (!path.startsWith(root + File.separator)) {
+        return null;
+      }
+      final String rel = path.substring(root.length() + 1);
+      if (rel.equals("Android") || rel.startsWith("Android" + File.separator)) {
+        return null;
+      }
+      return "primary:" + rel;
+    } catch (final IOException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Where PROJECTNAME's browser login is kept. Private storage, because the file holds a live
+   * session and a mirror folder is readable by every app on the device.
+   *
+   * @param internal
+   *          getFilesDir(), the app's own storage
+   * @param projectName
+   *          the project, which has to be one valid path segment
+   * @return the file, or null when there is no name we may build a path from
+   */
+  static File loginCookiesFile(final File internal, final String projectName) {
+    if (internal == null || !isValidProjectName(projectName)) {
+      return null;
+    }
+    return new File(new File(internal, "logins"), projectName + ".txt");
+  }
+
+  /**
+   * Where PROJECTNAME's login bundles are kept, which the crawl passes as --bundle-dir. Private
+   * storage, for the same reason as {@link #loginCookiesFile}, and one folder per project so
+   * two projects logging into the same site do not share a bundle.
+   *
+   * @param internal
+   *          getFilesDir(), the app's own storage
+   * @param projectName
+   *          the project, which has to be one valid path segment
+   * @return the folder, or null when there is no name we may build a path from
+   */
+  static File loginBundleDir(final File internal, final String projectName) {
+    final File login = loginCookiesFile(internal, projectName);
+    return login == null ? null : new File(login.getParentFile(), projectName);
+  }
+
+  /**
+   * Every file holding PROJECTNAME's saved login: the one the engine reads, plus whatever its
+   * own save left beside it.
+   *
+   * @param internal
+   *          getFilesDir(), the app's own storage
+   * @param projectName
+   *          the project, which has to be one valid path segment
+   * @return the files to delete, each one before the folder that holds it, empty when nothing
+   *         is saved
+   */
+  static List<File> savedLoginFiles(final File internal, final String projectName) {
+    final File login = loginCookiesFile(internal, projectName);
+    final File dir = login != null ? login.getParentFile() : null;
+    final File[] saved = dir != null ? dir.listFiles() : null;
+    final List<File> files = new ArrayList<File>();
+    if (saved != null) {
+      for (final File file : saved) {
+        if (isLoginSibling(login.getName(), file.getName())) {
+          files.add(file);
+        }
+      }
+    }
+    final File bundles = loginBundleDir(internal, projectName);
+    final File[] inside = bundles != null ? bundles.listFiles() : null;
+    if (inside != null) {
+      for (final File file : inside) {
+        files.add(file);
+      }
+      files.add(bundles);
+    }
+    return files;
+  }
+
+  /** The suffix a build before the login bundles staged its own write through. */
+  private static final String STAGED_SUFFIX = ".new";
+
+  /**
+   * Whether LOGINFILENAME names CANDIDATE, or one of the files a save leaves beside it. The
+   * engine leaves its {@code .bak}, its {@code .<pid>.tmp}, and the temporary the {@code .bak}
+   * is staged through. A build before the login bundles left its own {@code .new} behind when
+   * the app died mid-write, and an upgraded device still holds it. Each one can hold a whole
+   * jar. No run deletes another's temporary.
+   */
+  static boolean isLoginSibling(final String loginFileName, final String candidate) {
+    return candidate != null
+        && candidate.matches(Pattern.quote(loginFileName) + "(" + Pattern.quote(STAGED_SUFFIX)
+            + "|(\\.bak)?(\\.[0-9]+\\.tmp)?)");
+  }
+
+  /**
+   * Whether {@code name} is safe to append to a root as one directory. File does not fold "..", so
+   * a crafted winprofile.ini name like "../../sdcard/evil" would otherwise steer the engine's -O
+   * outside the Websites tree. Rejects empty, ".", ".." and anything carrying a path separator.
+   *
+   * @param name
+   *          the project name, already whitespace-collapsed
+   * @return true if it denotes a single, in-root directory segment
+   */
+  static boolean isValidProjectName(final String name) {
+    if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) {
+      return false;
+    }
+    for (int i = 0; i < name.length(); i++) {
+      final char c = name.charAt(i);
+      if (c == '/' || c == '\\' || c == '\0') {
+        return false;
+      }
+    }
+    return true;
+  }
+}

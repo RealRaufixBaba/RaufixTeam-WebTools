@@ -1,0 +1,40 @@
+<resources>
+
+    <!-- Application theme. -->
+    <style name="AppBaseTheme" parent="@android:style/Theme.Holo.Light" />
+
+    <!-- Custom styles -->
+    <!-- No parent: buttons already pick the theme's buttonStyle up as their default style. -->
+    <style name="ButtonStyle">
+        <item name="android:background">?android:attr/selectableItemBackground</item>
+    </style>
+
+    <style name="DividerLineVertical">
+        <item name="android:layout_width">1dip</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_marginBottom">8dp</item>
+        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:background">@color/black</item>
+    </style>
+
+    <style name="DividerLineHorizontal">
+        <item name="android:layout_height">1dp</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_marginBottom">8dp</item>
+        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:background">@color/black</item>
+    </style>
+
+    <style name="BorderlessButtonLeft">
+        <item name="android:gravity">center</item>
+    </style>
+
+    <style name="BorderlessButtonCenter">
+        <item name="android:gravity">center</item>
+    </style>
+
+    <style name="BorderlessButtonRight">
+        <item name="android:gravity">center</item>
+    </style>
+
+</resources>

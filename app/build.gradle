@@ -1,0 +1,134 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.httrack.android'
+    compileSdk 36
+    // Pinned to what the toolchain image installs, so no build-tools are fetched at build time.
+    buildToolsVersion "36.0.0"
+    ndkVersion "27.3.13750724"
+
+    defaultConfig {
+        applicationId "com.httrack.android"
+        minSdk 24
+        // Google requires API 36 to keep publishing updates from 2026-08-31. Edge-to-edge window
+        // insets (EdgeToEdge) are now mandatory: the platform ignores the opt-out at this level.
+        targetSdk 36
+        // Must exceed the versionCode currently live on the Play listing before uploading.
+        versionCode 110
+        // versionName = <pinned engine's HTTRACK_VERSIONID>.<versionCode>
+        versionName "3.51.0.110"
+
+        ndk {
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    // Release signing reads a gitignored keystore.properties (see keystore.properties.sample).
+    // Without it — e.g. on CI — the release stays unsigned, exactly as before.
+    signingConfigs {
+        release {
+            def propsFile = rootProject.file('keystore.properties')
+            if (propsFile.exists()) {
+                final Properties props = new Properties()
+                props.load(new FileInputStream(propsFile))
+                // Fail loudly on an incomplete file: a missing key otherwise yields a silently
+                // unsigned AAB (AGP skips signing when the config is not ready), which Play rejects.
+                ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { k ->
+                    if (!props.getProperty(k)?.trim()) {
+                        throw new GradleException("keystore.properties is missing '${k}'")
+                    }
+                }
+                storeFile rootProject.file(props.getProperty('storeFile'))
+                storePassword props.getProperty('storePassword')
+                keyAlias props.getProperty('keyAlias')
+                keyPassword props.getProperty('keyPassword')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (rootProject.file('keystore.properties').exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    buildFeatures {
+        // HTTrackActivity reads BuildConfig.APPLICATION_ID for the FileProvider authority.
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // This 2017-era code trips many modern checks; keep the build green and tighten later.
+    lint {
+        abortOnError false
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path 'src/main/jni/Android.mk'
+        }
+    }
+
+    sourceSets.main.res.srcDir(layout.buildDirectory.dir('generated/bundle/res'))
+}
+
+// The in-app Help/docs bundle (R.raw.resources) is assembled from the pinned httrack
+// engine at build time, never committed, so it can't drift from the submodule the way
+// the old checked-in zip silently did for years. html/ and templates/ come from the
+// engine; license/ is a static HTML asset the engine ships only as plain text.
+def buildResourcesBundle = tasks.register('buildResourcesBundle', Zip) {
+    archiveFileName = 'resources.zip'
+    destinationDirectory = layout.buildDirectory.dir('generated/bundle/res/raw')
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+    from('src/main/jni/httrack/html') { into 'html'; exclude 'Makefile.am' }
+    from('src/main/jni/httrack/templates') { into 'templates'; exclude 'Makefile.am' }
+    from('src/main/bundle/license') { into 'license' }
+    // html/index.html links to ../greetings.txt, ../history.txt and ../license.txt at the bundle root.
+    from('src/main/jni/httrack') { include 'greetings.txt', 'history.txt', 'license.txt' }
+}
+// preBuild is a transitive ancestor of every resource task, so this one edge gives
+// them all the dependency on the generated bundle that Gradle's validation requires.
+tasks.named('preBuild').configure { dependsOn buildResourcesBundle }
+
+// NumericFieldInputTypeTest reads the layout XMLs off disk, which Gradle can't infer.
+tasks.withType(Test).configureEach {
+    inputs.files(fileTree('src/main/res') { include 'layout*/**/*.xml' })
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+            .withPropertyName('layoutXml')
+    // Tests read the JNI glue and the pinned engine, so a bump that moves what they
+    // assert has to re-run them rather than report UP-TO-DATE.
+    inputs.files(fileTree('src/main/jni') {
+        include '*.c', '*.h', 'httrack/src/*.c', 'httrack/src/*.h'
+        include 'httrack/*.tsv', 'httrack/html/*.html'
+    })
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+            .withPropertyName('nativeSources')
+}
+
+dependencies {
+    // Without this, coroutines' stale jdk7/jdk8 shims collide with the stdlib that absorbed them.
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.fragment:fragment:1.8.2'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+
+    // Custom Tabs: help pages open over the app, one back tap from the screen that asked for them.
+    implementation 'androidx.browser:browser:1.8.0'
+
+    // Loopback HTTP server so a real browser reads scoped-storage mirrors over http://.
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+
+    testImplementation 'junit:junit:4.13.2'
+}

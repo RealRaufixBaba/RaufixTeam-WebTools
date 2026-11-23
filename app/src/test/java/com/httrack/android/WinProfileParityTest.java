@@ -1,0 +1,327 @@
+package com.httrack.android;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import android.util.Pair;
+import com.httrack.android.OptionsMapper.GatedFeatureHandler;
+import com.httrack.android.OptionsMapper.MultipleChoicesOption;
+import com.httrack.android.OptionsMapper.OptionMapper;
+import com.httrack.android.OptionsMapper.ProfileFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
+import org.junit.Test;
+
+/** Checks winprofile.ini storage and option emission against WinHTTrack's conventions. */
+public class WinProfileParityTest {
+  /* Building it rejects a duplicate key in either table, throwing from
+     OptionsMapper, so no separate duplicate-key test can ever fire. */
+  private static final OptionsMapper MAPPER = new OptionsMapper();
+
+  /* Both mapper halves are private inner classes, so a probe handler names them. */
+  private static final Class<?> GATED_VALUE =
+      new GatedFeatureHandler("", "").getValueMapper().getClass();
+  private static final Class<?> GATED_TOGGLE =
+      new GatedFeatureHandler("", "").getToggleMapper().getClass();
+
+  private static List<String> emit(final OptionMapper mapper, final String value) {
+    final List<String> cmd = new ArrayList<String>();
+    mapper.emit(cmd, value);
+    return cmd;
+  }
+
+  /* A profile file, in the order its lines appear. */
+  private static Map<String, String> file(final String... pairs) {
+    final Map<String, String> raw = new LinkedHashMap<String, String>();
+    for (int i = 0; i < pairs.length; i += 2) {
+      raw.put(pairs[i], pairs[i + 1]);
+    }
+    return raw;
+  }
+
+  private static String[] boxes(final Map<String, String> values) {
+    return new String[] { values.get("Dos"), values.get("Iso9660") };
+  }
+
+  /* -x turns external links into error pages, and the engine defaults it off. */
+  @Test
+  public void noExternalPagesEmitsWhenChecked() {
+    assertEquals(Arrays.asList("-x"), emit(wiredMapper("NoExternalPages"), "1"));
+    assertTrue(emit(wiredMapper("NoExternalPages"), "0").isEmpty());
+  }
+
+  /* -%q includes query strings and -%q0 drops them; the box hides them. */
+  @Test
+  public void hideQueryStringsEmitsTheDisablingForm() {
+    assertEquals(Arrays.asList("-%q0"), emit(wiredMapper("NoQueryStrings"), "1"));
+    assertTrue(emit(wiredMapper("NoQueryStrings"), "0").isEmpty());
+  }
+
+  /* Bare -j re-asserts the engine default, so unticking the box needs -j0. */
+  @Test
+  public void parseJavaTurnsOffWithTheZeroForm() {
+    assertEquals(Arrays.asList("-j0"), emit(wiredMapper("ParseJava"), "0"));
+    assertTrue(emit(wiredMapper("ParseJava"), "1").isEmpty());
+  }
+
+  @Test
+  public void winHttrackProfileOpensWithBothBoxes() {
+    assertArrayEquals(new String[] { "0", "0" },
+        boxes(ProfileFormat.resolve(file("Dos", "0"))));
+    assertArrayEquals(new String[] { "1", "0" },
+        boxes(ProfileFormat.resolve(file("Dos", "1"))));
+    assertArrayEquals(new String[] { "0", "1" },
+        boxes(ProfileFormat.resolve(file("Dos", "2"))));
+    assertArrayEquals(new String[] { "1", "1" },
+        boxes(ProfileFormat.resolve(file("Dos", "3"))));
+  }
+
+  /* Our own older profiles wrote Dos as a plain boolean beside an Iso9660. */
+  @Test
+  public void olderProfileKeepsEveryRenamedSetting() {
+    final Map<String, String> values = ProfileFormat.resolve(file("Dos", "1",
+        "Iso9660", "1", "ProxyProtocol", "1", "KeepWwwPrefix", "1",
+        "KeepDoubleSlashes", "1", "Pause", "2:5"));
+    assertArrayEquals(new String[] { "1", "1" }, boxes(values));
+    assertEquals("1", values.get("ProxyType"));
+    assertEquals("1", values.get("KeepWww"));
+    assertEquals("1", values.get("KeepSlashes"));
+    assertEquals("2:5", values.get("PauseFiles"));
+    assertFalse(values.containsKey("ProxyProtocol"));
+  }
+
+  /* The split must read the file, not the map it is filling: a profile with no
+     Dos line would otherwise clear a saved Iso9660. */
+  @Test
+  public void profileWithoutDosLeavesBothBoxesAlone() {
+    final Map<String, String> values = ProfileFormat.resolve(file("ProxyType",
+        "1"));
+    assertFalse(values.containsKey("Dos"));
+    assertFalse(values.containsKey("Iso9660"));
+  }
+
+  @Test
+  public void aDosWithNoValueAtAllLeavesTheBoxesAlone() {
+    final Map<String, String> values = ProfileFormat.resolve(file("Dos", null));
+    assertNull(values.get("Dos"));
+    assertFalse(values.containsKey("Iso9660"));
+  }
+
+  @Test
+  public void unreadableDosLeavesTheBoxesAlone() {
+    assertEquals("yes", ProfileFormat.resolve(file("Dos", "yes")).get("Dos"));
+    assertNull(ProfileFormat.resolve(file("Dos", "yes")).get("Iso9660"));
+    assertEquals("", ProfileFormat.resolve(file("Dos", "")).get("Dos"));
+  }
+
+  @Test
+  public void dosPacksBothBoxes() {
+    assertEquals("0", ProfileFormat.pack("0", "0"));
+    assertEquals("1", ProfileFormat.pack("1", "0"));
+    assertEquals("2", ProfileFormat.pack("0", "1"));
+    assertEquals("3", ProfileFormat.pack("1", "1"));
+    assertEquals("0", ProfileFormat.pack(null, null));
+  }
+
+  /* WinHTTrack has no Iso9660 key, so ours must not survive into the file. */
+  @Test
+  public void writtenProfileFoldsIso9660IntoDos() {
+    final Map<String, String> written = ProfileFormat.toFile(file("Dos", "0",
+        "Iso9660", "1", "ProxyType", "1"));
+    assertEquals("2", written.get("Dos"));
+    assertFalse(written.containsKey("Iso9660"));
+    assertEquals("1", written.get("ProxyType"));
+  }
+
+  @Test
+  public void everyBoxCombinationSurvivesAWriteAndRead() {
+    for (final String dos : new String[] { "0", "1" }) {
+      for (final String iso9660 : new String[] { "0", "1" }) {
+        final Map<String, String> values = ProfileFormat.resolve(ProfileFormat
+            .toFile(file("Dos", dos, "Iso9660", iso9660)));
+        assertArrayEquals(dos + "/" + iso9660,
+            new String[] { dos, iso9660 }, boxes(values));
+      }
+    }
+  }
+
+  @Test
+  public void renamedKeysMapBothWays() {
+    assertEquals("ProxyType", ProfileFormat.canonicalName("ProxyProtocol"));
+    assertEquals("ProxyProtocol", ProfileFormat.legacyName("ProxyType"));
+    assertEquals("KeepWww", ProfileFormat.canonicalName("KeepWwwPrefix"));
+    assertEquals("KeepSlashes",
+        ProfileFormat.canonicalName("KeepDoubleSlashes"));
+    assertEquals("PauseFiles", ProfileFormat.canonicalName("Pause"));
+    assertEquals("Pause", ProfileFormat.legacyName("PauseFiles"));
+    assertEquals("Near", ProfileFormat.canonicalName("Near"));
+    assertNull(ProfileFormat.legacyName("Near"));
+  }
+
+  /* The mapper fieldsMapper wires KEY to, so the emission tests run what ships. */
+  private static OptionMapper wiredMapper(final String key) {
+    for (final Pair<String, OptionMapper> field : MAPPER.fieldsMapper) {
+      if (key.equals(field.first)) {
+        return field.second;
+      }
+    }
+    fail(key + " is not in fieldsMapper");
+    return null;
+  }
+
+  private static List<String> serializerKeys() {
+    return TestSources.serializerKeys();
+  }
+
+  private static List<String> mapperKeys() {
+    final List<String> keys = new ArrayList<String>();
+    for (final Pair<String, OptionMapper> field : MAPPER.fieldsMapper) {
+      keys.add(field.first);
+    }
+    return keys;
+  }
+
+  /* The two tables are halves of one wiring: a key stored with no mapper never
+     reaches the engine, and a mapper under no stored key never runs. */
+  @Test
+  public void everyStoredKeyHasAMapper() {
+    assertEquals(new TreeSet<String>(serializerKeys()),
+        new TreeSet<String>(mapperKeys()));
+  }
+
+  @Test
+  public void keysUseTheWinHttrackSpelling() {
+    final List<String> keys = serializerKeys();
+    assertTrue(keys.containsAll(Arrays.asList("ProxyType", "KeepWww",
+        "KeepSlashes", "PauseFiles")));
+    for (final String legacy : new String[] { "ProxyProtocol",
+        "KeepWwwPrefix", "KeepDoubleSlashes", "Pause" }) {
+      assertFalse(legacy + " still written", keys.contains(legacy));
+    }
+  }
+
+  /* A rename that leaves canonicalName pointing at no field drops the setting
+     in silence, so the targets have to stay real keys. */
+  @Test
+  public void everyRenameTargetIsAStoredKey() {
+    final List<String> keys = serializerKeys();
+    for (final String key : keys) {
+      final String legacy = ProfileFormat.legacyName(key);
+      if (legacy != null) {
+        assertEquals(key, ProfileFormat.canonicalName(legacy));
+      }
+    }
+    for (final String legacy : new String[] { "ProxyProtocol",
+        "KeepWwwPrefix", "KeepDoubleSlashes", "Pause" }) {
+      assertTrue(legacy + " resolves to no stored key",
+          keys.contains(ProfileFormat.canonicalName(legacy)));
+    }
+  }
+
+  /* A hand-edited profile reaches the radio mappers with anything at all. */
+  @Test
+  public void aChoiceOutsideTheTableEmitsNothing() {
+    for (final String value : new String[] { "4", "99999999999", "", "abc",
+        null }) {
+      assertTrue("value " + value,
+          emit(MultipleChoicesOption.ACTION, value).isEmpty());
+    }
+  }
+
+  /* No flag may re-assert an engine default to mean "off", whichever primitive
+     spells it: the -%q bug wore SimpleOption0 rather than a reverted flag.
+     Reads the real fieldsMapper table, so it also covers the -%r, -%m and -%Z
+     toggles GatedFeatureHandler builds behind its private Toggle class. Only
+     wired entries are covered, since a mapper no key names emits nothing. */
+  @Test
+  public void noOffSwitchEmitsABareEnablingForm() {
+    final List<String> reverted = new ArrayList<String>();
+    final List<String> tristate = new ArrayList<String>();
+    final List<String> toggles = new ArrayList<String>();
+    for (final Pair<String, OptionMapper> field : MAPPER.fieldsMapper) {
+      final OptionMapper mapper = field.second;
+      if (mapper instanceof OptionsMapper.SimpleOptionFlag) {
+        final OptionsMapper.SimpleOptionFlag flag =
+            (OptionsMapper.SimpleOptionFlag) mapper;
+        if (flag.reverted) {
+          reverted.add(flag.option);
+          assertTrue("-" + flag.option + " must carry its 0 form",
+              flag.option.endsWith("0"));
+        }
+      } else if (mapper instanceof OptionsMapper.SimpleOption0) {
+        final String option = ((OptionsMapper.SimpleOption0) mapper).option;
+        tristate.add(option);
+        assertFalse("-" + option + " emits both forms, so it may not be "
+            + "spelled as its own off switch", option.endsWith("0"));
+      } else if (GATED_TOGGLE.equals(mapper.getClass())) {
+        toggles.add(field.first);
+        /* Toggle has no fields of its own, so behavior stands in for reverted. */
+        final List<String> off = emit(mapper, "0");
+        assertTrue(field.first + " must carry its 0 form or emit nothing "
+            + "when off", off.isEmpty() || off.get(0).endsWith("0"));
+      }
+    }
+    assertEquals("reverted flags", new TreeSet<String>(Arrays.asList("b0",
+        "j0", "I0", "C0")), new TreeSet<String>(reverted));
+    assertEquals("tri-state options", new TreeSet<String>(Arrays.asList("%P",
+        "%k", "%u", "%f")), new TreeSet<String>(tristate));
+    /* The branch above matches on class identity, so a wrapped or subclassed
+       Toggle would drop all three toggles out of the test in silence. */
+    assertEquals("gated toggles", new TreeSet<String>(Arrays.asList("Warc",
+        "Sitemap", "SingleFile")), new TreeSet<String>(toggles));
+  }
+
+  /* The engine reads -iC1 as -i followed by -C1, so a Cache token later in
+     argv decides the cache mode instead of the action radio. */
+  @Test
+  public void tickedCacheSaysNothingAboutTheCacheMode() {
+    final OptionMapper cache = wiredMapper("Cache");
+    assertEquals("ticked Cache must leave the mode to the action token",
+        Arrays.asList(), emit(cache, "1"));
+    assertEquals("unticked Cache", Arrays.asList("-C0"), emit(cache, "0"));
+  }
+
+  /* Each value is withheld until its box is ticked, as WinHTTrack does, and
+     the handler reads that box from the token emitted before it. */
+  @Test
+  public void everyGatedValueFollowsItsCheckbox() {
+    final List<String> keys = serializerKeys();
+    final String pairs[][] = { { "Warc", "WarcFile" },
+        { "Sitemap", "SitemapUrl" },
+        { "SingleFile", "SingleFileMaxSize" } };
+    for (final String[] pair : pairs) {
+      assertTrue(pair[0] + " missing", keys.contains(pair[0]));
+      assertTrue(pair[1] + " missing", keys.contains(pair[1]));
+      assertTrue(pair[1] + " must follow " + pair[0],
+          keys.indexOf(pair[0]) < keys.indexOf(pair[1]));
+      final OptionMapper toggle = wiredMapper(pair[0]);
+      final OptionMapper value = wiredMapper(pair[1]);
+      emit(toggle, "1");
+      assertFalse(pair[1] + " says nothing once " + pair[0] + " is ticked",
+          emit(value, "1").isEmpty());
+      emit(toggle, "0");
+      assertEquals(pair[1] + " escapes its box", Arrays.asList(),
+          emit(value, "1"));
+    }
+    final TreeSet<String> wired = new TreeSet<String>();
+    for (final Pair<String, OptionMapper> field : MAPPER.fieldsMapper) {
+      if (GATED_VALUE.equals(field.second.getClass())) {
+        wired.add(field.first);
+      }
+    }
+    final TreeSet<String> covered = new TreeSet<String>();
+    for (final String[] pair : pairs) {
+      covered.add(pair[1]);
+    }
+    /* A gated value with no row above would go unchecked in silence. */
+    assertEquals("gated values covered", wired, covered);
+  }
+}

@@ -1,0 +1,143 @@
+# Copyright (C) 2009 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+LOCAL_PATH := $(call my-dir)
+
+# <https://github.com/langresser/libiconv-1.15-android/blob/master/Android.mk>
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libiconv
+# Build arm64-v8a with pointer authentication and branch target identification.
+# Never raise -march to armv8.3-a or later. Clang then fuses the return into retaa,
+# which faults on an ARMv8.0 core instead of decoding as a NOP.
+LOCAL_BRANCH_PROTECTION := standard
+LOCAL_CFLAGS := \
+  -Wno-multichar \
+  -DANDROID \
+  -DLIBDIR="\"c\"" \
+  -DBUILDING_LIBICONV \
+  -DIN_LIBRARY \
+  -DLIBICONV_PLUG
+LOCAL_SRC_FILES := \
+  libiconv-1.17/libcharset/lib/localcharset.c \
+  libiconv-1.17/lib/iconv.c \
+  libiconv-1.17/lib/relocatable.c
+LOCAL_C_INCLUDES += \
+  $(LOCAL_PATH)/include/iconv \
+  $(LOCAL_PATH)/libiconv-1.17/include \
+  $(LOCAL_PATH)/libiconv-1.17/libcharset \
+  $(LOCAL_PATH)/libiconv-1.17/lib \
+  $(LOCAL_PATH)/libiconv-1.17/libcharset/include \
+  $(LOCAL_PATH)/libiconv-1.17/srclib
+LOCAL_EXPORT_C_INCLUDES       := $(LOCAL_PATH)/libiconv-1.17/include
+include $(BUILD_SHARED_LIBRARY)
+
+# TODO FIXME: INVESTIGATE THIS
+# Android seems to have both /system/lib/libcrypto.so and
+# /system/lib/libssl.so, and Java loads them in priority when using
+# System.loadLibrary(...)
+# We should either ensure that the system libs are fine (they seems fine BTW)
+# or explicitly load the application-cached-library using some dirty magic
+# (ie. giving the explicit full path and .so)
+# For now, we do not ship the libraries, which will spare some space, and
+# hope the ABI won't change too much.
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libcrypto
+LOCAL_SRC_FILES := ../prebuild/$(TARGET_ARCH_ABI)/libcrypto.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libssl
+LOCAL_SRC_FILES := ../prebuild/$(TARGET_ARCH_ABI)/libssl.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := libhttrack
+LOCAL_BRANCH_PROTECTION := standard
+LOCAL_SRC_FILES := httrack/src/htscore.c httrack/src/htsparse.c 			\
+	httrack/src/htsback.c httrack/src/htscache.c httrack/src/htscatchurl.c 	\
+	httrack/src/htsfilters.c httrack/src/htsftp.c httrack/src/htshash.c 	\
+	httrack/src/coucal/coucal.c httrack/src/htshelp.c httrack/src/htslib.c 	\
+	httrack/src/htscoremain.c httrack/src/htsname.c httrack/src/htsrobots.c	\
+	httrack/src/htstools.c httrack/src/htswizard.c httrack/src/htsalias.c 	\
+	httrack/src/htsthread.c httrack/src/htsindex.c httrack/src/htsbauth.c 	\
+	httrack/src/htsbundle.c									\
+	httrack/src/htsbase.c									\
+	httrack/src/htsmd5.c httrack/src/htszlib.c httrack/src/htswrap.c 		\
+	httrack/src/htsconcat.c httrack/src/htsmodules.c 						\
+	httrack/src/htscharset.c httrack/src/punycode.c 						\
+	httrack/src/htsencoding.c httrack/src/md5.c								\
+	httrack/src/htssniff.c						\
+	httrack/src/htscodec.c httrack/src/htsproxy.c							\
+	httrack/src/htsdate.c httrack/src/htsurlport.c httrack/src/htswarc.c							\
+	httrack/src/htsescape.c										\
+	httrack/src/htsnet.c httrack/src/htsrandom.c							\
+	httrack/src/htssitemap.c httrack/src/htssinglefile.c					\
+	httrack/src/htschanges.c httrack/src/htscmdline.c						\
+	httrack/src/htslines.c													\
+	httrack/src/htsfetch.c						\
+	httrack/src/htspsl.c httrack/src/htspsl_data.c					\
+	httrack/src/htscrashtest.c												\
+	httrack/src/minizip/ioapi.c												\
+	httrack/src/minizip/mztools.c httrack/src/minizip/unzip.c				\
+	httrack/src/minizip/zip.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/httrack/src	\
+	$(LOCAL_PATH)/httrack/src/coucal			\
+	$(LOCAL_PATH)/../prebuild/$(TARGET_ARCH_ABI)/include	\
+	$(LOCAL_PATH)/include
+LOCAL_LDLIBS := -ldl -lz
+LOCAL_LDLIBS += -L$(LOCAL_PATH)/../prebuild/$(TARGET_ARCH_ABI)
+LOCAL_SHARED_LIBRARIES := libiconv
+LOCAL_STATIC_LIBRARIES := libssl libcrypto
+LOCAL_CFLAGS += -O3 -g3 -funwind-tables -fPIC 					\
+	-fstrict-aliasing -fvisibility=hidden									\
+	-Wall -Wformat -Wformat-security -Wmultichar -Wwrite-strings -Wcast-qual\
+	-Wcast-align -Wstrict-prototypes -Wmissing-prototypes					\
+	-Wmissing-declarations -Wdeclaration-after-statement -Wpointer-arith	\
+	-Wsequence-point -Wnested-externs -Wparentheses -Winit-self				\
+	-Wunused-but-set-parameter -Waddress -Wuninitialized -Wformat=2			\
+	-Wformat-nonliteral -Wold-style-definition		\
+	-Wignored-qualifiers -Wstrict-aliasing -Wno-sign-compare				\
+	-Wno-type-limits -Wno-missing-field-initializers -Wno-cast-align		\
+	-Wno-nested-externs														\
+	-D_REENTRANT -DPIC -DANDROID -D_ANDROID -DHAVE_CONFIG_H -DINET6 -DHTS_INTERNAL_BUILD			\
+	-DLIBHTTRACK_EXPORTS -DZLIB_CONST -DHTS_INTHASH_USES_MD5 -DLIBICONV_PLUG
+# HTS_INTERNAL_BYTECODE shows the engine-only half of the headers to the library.
+LOCAL_CFLAGS += -DHTS_INTERNAL_BYTECODE
+# The app never asks the engine for a self-test. The sources are gone from
+# LOCAL_SRC_FILES above too, because htsselftest_int.h #errors under this macro.
+LOCAL_CFLAGS += -DHTS_NO_SELFTEST
+LOCAL_CPPFLAGS += -pthread
+include $(BUILD_SHARED_LIBRARY)
+
+# NOTE: the old `libhtsjava` module (httrack/src/htsjava.c) was dropped — the
+# engine removed htsjava.c (the desktop Java-applet parser bridge) after 3.49-2,
+# and nothing on Android used it. "htsjava" is likewise removed from
+# HTTrackLib.loadLibraries().
+
+include $(CLEAR_VARS)
+LOCAL_MODULE    := htslibjni
+LOCAL_BRANCH_PROTECTION := standard
+LOCAL_SRC_FILES := htslibjni.c coffeecatch/coffeecatch.c coffeecatch/coffeejni.c
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/httrack/src	\
+	$(LOCAL_PATH)/httrack/src/coucal			\
+	$(LOCAL_PATH)/coffeecatch					\
+	$(LOCAL_PATH)/../prebuild/$(TARGET_ARCH_ABI)/include	\
+	$(LOCAL_PATH)/include
+LOCAL_SHARED_LIBRARIES := libhttrack
+LOCAL_LDLIBS := -llog
+LOCAL_CFLAGS := -O3 -g -funwind-tables -DHAVE_CONFIG_H -DHTS_INTERNAL_BUILD \
+	-W -Wall -Wextra -Werror -Wno-unused-parameter
+include $(BUILD_SHARED_LIBRARY)
